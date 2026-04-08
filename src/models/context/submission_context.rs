@@ -10,7 +10,7 @@ use chrono::{DateTime, Utc};
 pub struct SubmissionContext {
     pub submission_id: i32,
     pub assignment_id: i32,
-    pub student_id: i32,
+    pub user_id: i32,
     /// Raw submission content — essay text, code, or answer body.
     pub content: String,
     pub submitted_at: DateTime<Utc>,
