@@ -20,6 +20,7 @@ pub struct GradingResult {
     pub feedback_summary: String,
     pub evaluated_at: DateTime<Utc>,
     pub grading_model: String,
+    pub status: GradingStatus,
 }
 
 impl GradingResult {
