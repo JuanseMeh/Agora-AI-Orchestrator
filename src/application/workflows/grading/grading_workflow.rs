@@ -1,7 +1,7 @@
 // application/workflows/grading/grading_workflow.rs
 
-use crate::application::workflows::steps::evaluate_criteria::EvaluateCriteria;
-use crate::application::workflows::steps::aggregate_scores::AggregateScores;
+use crate::application::workflows::grading::steps::evaluate_criteria::EvaluateCriteria;
+use crate::application::workflows::grading::steps::aggregate_scores::AggregateScores;
 use crate::domain::ports::llm_provider::{LlmError, LlmProvider};
 use crate::models::context::assignment_context::AssignmentContext;
 use crate::models::context::submission_context::GradingContext;
