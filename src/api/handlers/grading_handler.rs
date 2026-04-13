@@ -1,25 +1,24 @@
-#![allow(dead_code)]
-
-
 use tonic::{Request, Response, Status};
 use std::sync::Arc;
 use crate::api::proto::ai_service_server::AiService;
-use crate::api::proto::{GradeAssignmentRequest, GradeAssignmentResponse};
+use crate::api::proto::{
+    GradeAssignmentRequest, GradeAssignmentResponse,
+    GradingResult as ProtoGradingResult,
+    CriterionResult as ProtoCriterionResult,
+};
+use crate::context::aggregator::{ContextAggregator, AggregatorError};
 use crate::orchestration::orchestrator::{Orchestrator, OrchestratorError};
 use crate::orchestration::intent_router::OrchestratorRequest;
-/// gRPC handler for the GradeAssignment RPC.
-///
-/// Receives the raw proto request, constructs the orchestrator request,
-/// delegates to the `Orchestrator`, and maps the result back to a proto response.
-/// This is the only file in the codebase that knows about both proto types
-/// and orchestrator types simultaneously.
+use crate::models::grading::grading_result::GradingResult;
+
 pub struct GradingHandler {
     orchestrator: Arc<Orchestrator>,
+    aggregator: Arc<ContextAggregator>,
 }
 
 impl GradingHandler {
-    pub fn new(orchestrator: Arc<Orchestrator>) -> Self {
-        Self { orchestrator }
+    pub fn new(orchestrator: Arc<Orchestrator>, aggregator: Arc<ContextAggregator>) -> Self {
+        Self { orchestrator, aggregator }
     }
 }
 
@@ -31,32 +30,74 @@ impl AiService for GradingHandler {
     ) -> Result<Response<GradeAssignmentResponse>, Status> {
         let req = request.into_inner();
 
+        let (assignment, context) = self.aggregator
+            .build_grading_context(req.assignment_id)
+            .await
+            .map_err(map_aggregator_error)?;
+
         let orchestrator_request = OrchestratorRequest::GradeAssignment {
             workspace_id: req.workspace_id,
             assignment_id: req.assignment_id,
         };
 
-        // TODO: context aggregation layer will replace these placeholders
-        // once the workspace client is built. For now the orchestrator
-        // cannot be called without real assignment + grading context.
-        // This will be wired in the next layer.
-        let _ = orchestrator_request;
+        let results = self.orchestrator
+            .dispatch(orchestrator_request, &assignment, &context)
+            .await
+            .map_err(map_orchestrator_error)?;
 
-        Err(Status::unimplemented(
-            "context aggregation not yet wired — coming in next layer",
-        ))
+        let proto_results = results.into_iter().map(into_proto_result).collect();
+
+        Ok(Response::new(GradeAssignmentResponse {
+            results: proto_results,
+        }))
     }
 }
 
-/// Maps an `OrchestratorError` to a gRPC `Status`.
-/// Kept as a standalone function so it can be tested independently.
-pub fn map_orchestrator_error(error: OrchestratorError) -> Status {
-    match error {
-        OrchestratorError::GradingFailed(msg) => {
-            Status::internal(format!("grading failed: {}", msg))
+fn into_proto_result(r: GradingResult) -> ProtoGradingResult {
+    ProtoGradingResult {
+        result_id: r.result_id.to_string(),
+        submission_id: r.submission_id,
+        total_score: r.total_score,
+        max_score: r.max_score,
+        feedback_summary: r.feedback_summary,
+        grading_model: r.grading_model,
+        evaluated_at: r.evaluated_at.to_rfc3339(),
+        criteria_results: r.criteria_results.into_iter().map(|c| {
+            ProtoCriterionResult {
+                criterion_id: c.criterion_id,
+                criterion_name: c.criterion_name,
+                score: c.score,
+                max_score: c.max_score,
+                feedback: c.feedback,
+                matched_level: c.matched_level,
+            }
+        }).collect(),
+    }
+}
+
+pub fn map_aggregator_error(e: AggregatorError) -> Status {
+    match e {
+        AggregatorError::AssignmentNotClosed { id } => {
+            Status::failed_precondition(format!("assignment {} is not closed", id))
         }
-        OrchestratorError::NotImplemented(msg) => {
-            Status::unimplemented(format!("not implemented: {}", msg))
+        AggregatorError::NoSubmissions { assignment_id } => {
+            Status::not_found(format!("no submissions for assignment {}", assignment_id))
+        }
+        AggregatorError::WorkspaceClient(e) => {
+            Status::internal(e.to_string())
+        }
+        AggregatorError::RubricParseFailed { assignment_id, reason } => {
+            Status::internal(format!("rubric parse failed for {}: {}", assignment_id, reason))
+        }
+        AggregatorError::ContentExtractionFailed { submission_id } => {
+            Status::internal(format!("content extraction failed for submission {}", submission_id))
         }
     }
-} 
+}
+
+pub fn map_orchestrator_error(e: OrchestratorError) -> Status {
+    match e {
+        OrchestratorError::GradingFailed(msg) => Status::internal(msg),
+        OrchestratorError::NotImplemented(msg) => Status::unimplemented(msg),
+    }
+}
