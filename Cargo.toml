@@ -35,6 +35,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Configuration
 config = "0.15.22"
+dotenvy = "0.15.7"
 
 # Async traits (needed for Tool interface)
 async-trait = "0.1"
