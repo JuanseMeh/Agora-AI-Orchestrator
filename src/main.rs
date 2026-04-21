@@ -19,7 +19,10 @@ use dotenvy;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"))
+        )
         .init();
 
         dotenvy::dotenv().ok();
@@ -27,6 +30,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let provider = GeminiClient::from_env()?;
     let orchestrator = Arc::new(Orchestrator::new(Arc::new(provider)));
     let aggregator = Arc::new(ContextAggregator::from_env()?);
+
+    tracing::info!("AI service starting up");
+    tracing::info!("Gemini provider initialized");
+    tracing::info!("Context aggregator initialized");
 
     api::server::serve(orchestrator, aggregator).await?;
 
