@@ -37,7 +37,7 @@ pub struct AssignmentResponse {
     pub name: String,
     pub description: String,
     pub due_date: DateTime<Utc>,
-    pub status: i16,
+    pub status: String,
     pub rubric: Value,
     pub settings: Option<Value>,
     pub is_expired: bool,
@@ -50,7 +50,7 @@ pub struct AssignmentResponse {
 pub struct SubmissionResponse {
     pub id: i32,
     pub assignment_id: i32,
-    pub user_id: i32,
+    pub user_id: uuid::Uuid,
     pub created_at: DateTime<Utc>,
     pub content: Value,
     pub files: Option<Value>,

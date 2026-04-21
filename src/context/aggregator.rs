@@ -56,7 +56,7 @@ impl ContextAggregator {
         let raw_assignment = self.client.fetch_assignment(assignment_id).await?;
 
         // status 2 = Cerrado — only closed assignments can be graded
-        if raw_assignment.status != 2 {
+        if raw_assignment.status != "CERRADO" {
             return Err(AggregatorError::AssignmentNotClosed { id: assignment_id });
         }
 
