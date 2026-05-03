@@ -35,6 +35,7 @@ FROM alpine:latest AS production
 RUN apk add --no-cache \
     libssl3 \
     ca-certificates \
+    curl \
     && adduser -D -s /bin/sh appuser
 
 # Create app directory
