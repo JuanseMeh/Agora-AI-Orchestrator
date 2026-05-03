@@ -6,6 +6,7 @@ use uuid::Uuid;
 /// The AI module receives this as input — it never stores rubrics itself.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Rubric {
+    #[serde(default = "Uuid::nil")]
     pub rubric_id: Uuid,
     pub assignment_id: i32,
     pub title: String,
@@ -26,8 +27,10 @@ impl Rubric {
 pub struct RubricCriterion {
     pub criterion_id: String,
     pub name: String,
-    pub description: String,
+    #[serde(default)]
+    pub description: Option<String>,
     /// Relative importance of this criterion in the final grade.
+    #[serde(default, alias = "value")]
     pub weight: f64,
     /// Ordered scoring levels from lowest to highest performance.
     pub scoring_levels: Vec<ScoringLevel>,

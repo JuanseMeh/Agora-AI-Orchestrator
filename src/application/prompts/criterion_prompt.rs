@@ -16,6 +16,10 @@ impl CriterionPromptBuilder {
     /// - return a structured JSON response matching `CriterionResult`
     pub fn build(criterion: &RubricCriterion, submission_text: &str) -> String {
         let scoring_levels = criterion.levels_as_prompt_context();
+        let description = criterion
+            .description
+            .as_deref()
+            .unwrap_or("No description provided.");
 
         format!(
             "You are an academic evaluator. Your task is to evaluate a student submission \
@@ -43,7 +47,7 @@ impl CriterionPromptBuilder {
               \"matched_level\": \"<label of the matched scoring level>\"\n\
             }}",
             name           = criterion.name,
-            description    = criterion.description,
+            description    = description,
             scoring_levels = scoring_levels,
             submission     = submission_text,
             criterion_id   = criterion.criterion_id,

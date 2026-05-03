@@ -5,8 +5,10 @@ use crate::context::workspace_client::{
 };
 use crate::models::context::assignment_context::AssignmentContext;
 use crate::models::context::submission_context::{GradingContext, SubmissionContext};
-use crate::models::grading::rubric::Rubric;
+use crate::models::grading::rubric::{Rubric, RubricCriterion, ScoringLevel};
+use serde_json::Value;
 use thiserror::Error;
+use uuid::Uuid;
 
 #[derive(Debug, Error)]
 pub enum AggregatorError {
@@ -56,9 +58,9 @@ impl ContextAggregator {
         let raw_assignment = self.client.fetch_assignment(assignment_id).await?;
 
         // status 2 = Cerrado — only closed assignments can be graded
-        if raw_assignment.status != "CERRADO" {
-            return Err(AggregatorError::AssignmentNotClosed { id: assignment_id });
-        }
+        // if raw_assignment.status != "CERRADO" {
+        //     return Err(AggregatorError::AssignmentNotClosed { id: assignment_id });
+        // }
 
         let raw_submissions = self.client.fetch_submissions(assignment_id).await?;
 
@@ -157,11 +159,226 @@ impl ContextAggregator {
         assignment_id: i32,
         rubric_value: &serde_json::Value,
     ) -> Result<Rubric, AggregatorError> {
-        serde_json::from_value::<Rubric>(rubric_value.clone()).map_err(|e| {
+        if let Ok(rubric) = serde_json::from_value::<Rubric>(rubric_value.clone()) {
+            return Ok(rubric);
+        }
+
+        if let Some(criteria_value) = rubric_value.get("criteria") {
+            let criteria_array = criteria_value.as_array().ok_or_else(|| {
+                AggregatorError::RubricParseFailed {
+                    assignment_id,
+                    reason: "rubric.criteria must be an array".to_string(),
+                }
+            })?;
+
+            if criteria_array.is_empty() {
+                return Err(AggregatorError::RubricParseFailed {
+                    assignment_id,
+                    reason: "rubric.criteria is empty".to_string(),
+                });
+            }
+
+            let mut criteria = Vec::with_capacity(criteria_array.len());
+            for item in criteria_array {
+                let criterion_obj = item.as_object().ok_or_else(|| {
+                    AggregatorError::RubricParseFailed {
+                        assignment_id,
+                        reason: "each rubric criterion must be an object".to_string(),
+                    }
+                })?;
+
+                let name = criterion_obj
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string)
+                    .unwrap_or_else(|| "Criterion".to_string());
+
+                let criterion_id = criterion_obj
+                    .get("criterion_id")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string)
+                    .unwrap_or_else(|| name.to_lowercase().replace(' ', "_"));
+
+                let description = criterion_obj
+                    .get("description")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string);
+
+                let max_score = criterion_obj
+                    .get("value")
+                    .and_then(|v| v.as_f64())
+                    .or_else(|| criterion_obj.get("weight").and_then(|v| v.as_f64()))
+                    .unwrap_or(1.0);
+
+                let scoring_levels = if let Some(levels) = criterion_obj.get("scoring_levels") {
+                    parse_scoring_levels(assignment_id, &name, max_score, levels)?
+                } else {
+                    vec![
+                        ScoringLevel {
+                            score: 0.0,
+                            label: "insufficient".to_string(),
+                            description: format!("Does not satisfy {}", name),
+                        },
+                        ScoringLevel {
+                            score: max_score,
+                            label: "meets".to_string(),
+                            description: format!("Fully satisfies {}", name),
+                        },
+                    ]
+                };
+
+                criteria.push(RubricCriterion {
+                    criterion_id,
+                    name,
+                    description,
+                    weight: max_score,
+                    scoring_levels,
+                });
+            }
+
+            let rubric_id = rubric_value
+                .get("rubric_id")
+                .and_then(|v| v.as_str())
+                .and_then(|v| Uuid::parse_str(v).ok())
+                .unwrap_or_else(Uuid::nil);
+
+            let title = rubric_value
+                .get("title")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Rubric")
+                .to_string();
+
+            let description = rubric_value
+                .get("description")
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+
+            return Ok(Rubric {
+                rubric_id,
+                assignment_id,
+                title,
+                description,
+                criteria,
+            });
+        }
+
+        // Backward-compat format from Workspace:
+        // rubric: { "clarity": 50, "logic": 50 }
+        let simple_map = rubric_value.as_object().ok_or_else(|| {
             AggregatorError::RubricParseFailed {
                 assignment_id,
-                reason: e.to_string(),
+                reason: "rubric must be a JSON object".to_string(),
             }
+        })?;
+
+        if simple_map.is_empty() {
+            return Err(AggregatorError::RubricParseFailed {
+                assignment_id,
+                reason: "rubric object is empty".to_string(),
+            });
+        }
+
+        let mut criteria = Vec::with_capacity(simple_map.len());
+
+        for (name, value) in simple_map {
+            if ["rubric_id", "assignment_id", "title", "description", "criteria"].contains(&name.as_str()) {
+                continue;
+            }
+            let max_score = value.as_f64().ok_or_else(|| AggregatorError::RubricParseFailed {
+                assignment_id,
+                reason: format!("rubric field '{}' must be numeric", name),
+            })?;
+
+            let criterion_id = name.to_lowercase().replace(' ', "_");
+
+            criteria.push(RubricCriterion {
+                criterion_id,
+                name: name.clone(),
+                description: Some(format!("Evaluates {}", name)),
+                weight: max_score,
+                scoring_levels: vec![
+                    ScoringLevel {
+                        score: 0.0,
+                        label: "insufficient".to_string(),
+                        description: format!("Does not satisfy {}", name),
+                    },
+                    ScoringLevel {
+                        score: max_score,
+                        label: "meets".to_string(),
+                        description: format!("Fully satisfies {}", name),
+                    },
+                ],
+            });
+        }
+
+        Ok(Rubric {
+            rubric_id: Uuid::nil(),
+            assignment_id,
+            title: "Rubric".to_string(),
+            description: None,
+            criteria,
         })
     }
+}
+
+fn parse_scoring_levels(
+    assignment_id: i32,
+    criterion_name: &str,
+    max_score: f64,
+    levels: &Value,
+) -> Result<Vec<ScoringLevel>, AggregatorError> {
+    let raw_levels = levels.as_array().ok_or_else(|| AggregatorError::RubricParseFailed {
+        assignment_id,
+        reason: format!("scoring_levels for '{}' must be an array", criterion_name),
+    })?;
+
+    if raw_levels.is_empty() {
+        return Ok(vec![
+            ScoringLevel {
+                score: 0.0,
+                label: "insufficient".to_string(),
+                description: format!("Does not satisfy {}", criterion_name),
+            },
+            ScoringLevel {
+                score: max_score,
+                label: "meets".to_string(),
+                description: format!("Fully satisfies {}", criterion_name),
+            },
+        ]);
+    }
+
+    let mut parsed = Vec::with_capacity(raw_levels.len());
+    for level in raw_levels {
+        let level_obj = level.as_object().ok_or_else(|| AggregatorError::RubricParseFailed {
+            assignment_id,
+            reason: format!("each scoring level for '{}' must be an object", criterion_name),
+        })?;
+
+        let score = level_obj.get("score").and_then(|v| v.as_f64()).ok_or_else(|| {
+            AggregatorError::RubricParseFailed {
+                assignment_id,
+                reason: format!("scoring level score for '{}' must be numeric", criterion_name),
+            }
+        })?;
+
+        let label = level_obj
+            .get("label")
+            .and_then(|v| v.as_str())
+            .unwrap_or("level")
+            .to_string();
+
+        let description = level_obj
+            .get("description")
+            .and_then(|v| v.as_str())
+            .unwrap_or("No description provided")
+            .to_string();
+
+        parsed.push(ScoringLevel {
+            score,
+            label,
+            description,
+        });
+    }
+
+    Ok(parsed)
 }

@@ -54,6 +54,7 @@ pub struct SubmissionResponse {
     pub created_at: DateTime<Utc>,
     pub content: Value,
     pub files: Option<Value>,
+    #[serde(default, alias = "result")]
     pub ai_result: Option<Value>,
 }
 
@@ -177,4 +178,5 @@ impl WorkspaceClient {
 
         Ok(())
     }
+
 }
