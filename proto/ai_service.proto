@@ -3,7 +3,36 @@ syntax = "proto3";
 package ai;
 
 service AiService {
+  rpc SuggestAssignment (SuggestAssignmentRequest) returns (SuggestAssignmentResponse);
+  rpc ApproveSuggestion (ApproveSuggestionRequest) returns (ApproveSuggestionResponse);
   rpc GradeAssignment (GradeAssignmentRequest) returns (GradeAssignmentResponse);
+}
+
+message SuggestAssignmentRequest {
+  int32 workspace_id  = 1;
+  int32 assignment_id = 2;
+  string requester_user_id = 3;
+}
+
+message SuggestionStats {
+  double average_score = 1;
+  double max_score = 2;
+  int32 graded_submissions = 3;
+}
+
+message SuggestAssignmentResponse {
+  string suggestion_id = 1;
+  repeated GradingResult results = 2;
+  SuggestionStats stats = 3;
+}
+
+message ApproveSuggestionRequest {
+  string suggestion_id = 1;
+}
+
+message ApproveSuggestionResponse {
+  string suggestion_id = 1;
+  repeated GradingResult results = 2;
 }
 
 message GradeAssignmentRequest {
