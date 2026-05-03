@@ -13,7 +13,7 @@ prost = "0.14.3"
 tonic-prost = "0.14.5"
 
 # REST client (for Workspace Service + Gemini)
-reqwest = { version = "0.13.2", features = ["json"], default-features = false }
+reqwest = { version = "0.13.2", features = ["json"] }
 
 # Serialization — used throughout models, Gemini payloads, JSONB writes
 serde = { version = "1", features = ["derive"] }
@@ -39,6 +39,7 @@ dotenvy = "0.15.7"
 
 # Async traits (needed for Tool interface)
 async-trait = "0.1"
+redis = { version = "0.27", features = ["tokio-comp"] }
 
 [build-dependencies]
 # Only needed when you add .proto files for gRPC
