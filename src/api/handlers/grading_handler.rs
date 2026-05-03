@@ -11,6 +11,7 @@ use crate::api::proto::{
 use crate::context::aggregator::{ContextAggregator, AggregatorError};
 use crate::context::suggestion_cache::{SuggestionCache, SuggestionCacheEntry, SuggestionCacheError};
 use crate::context::user_config_client::{UserConfigClient, UserConfigClientError};
+use crate::context::workspace_client::{WorkspaceClient, WorkspaceClientError, GradeWritePayload, CriterionResultPayload};
 use crate::domain::ports::llm_provider::LlmError;
 use crate::orchestration::orchestrator::{Orchestrator, OrchestratorError};
 use crate::orchestration::intent_router::OrchestratorRequest;
@@ -23,6 +24,7 @@ pub struct GradingHandler {
     aggregator: Arc<ContextAggregator>,
     user_config_client: Arc<UserConfigClient>,
     suggestion_cache: Arc<SuggestionCache>,
+    workspace_client: Arc<WorkspaceClient>,
 }
 
 impl GradingHandler {
@@ -31,8 +33,9 @@ impl GradingHandler {
         aggregator: Arc<ContextAggregator>,
         user_config_client: Arc<UserConfigClient>,
         suggestion_cache: Arc<SuggestionCache>,
+        workspace_client: Arc<WorkspaceClient>,
     ) -> Self {
-        Self { orchestrator, aggregator, user_config_client, suggestion_cache }
+        Self { orchestrator, aggregator, user_config_client, suggestion_cache, workspace_client }
     }
 }
 
@@ -111,6 +114,10 @@ impl AiService for GradingHandler {
             .await
             .map_err(map_suggestion_cache_error)?;
 
+        persist_results(&self.workspace_client, &cached.results)
+            .await
+            .map_err(map_workspace_client_error)?;
+
         Ok(Response::new(ApproveSuggestionResponse {
             suggestion_id: req.suggestion_id,
             results: cached.results.into_iter().map(into_proto_result).collect(),
@@ -137,6 +144,10 @@ impl AiService for GradingHandler {
             .dispatch(orchestrator_request, &assignment, &context)
             .await
             .map_err(map_orchestrator_error)?;
+
+        persist_results(&self.workspace_client, &results)
+            .await
+            .map_err(map_workspace_client_error)?;
 
         let proto_results = results.into_iter().map(into_proto_result).collect();
 
@@ -184,6 +195,28 @@ fn into_proto_result(r: GradingResult) -> ProtoGradingResult {
     }
 }
 
+async fn persist_results(
+    workspace_client: &WorkspaceClient,
+    results: &[GradingResult],
+) -> Result<(), WorkspaceClientError> {
+    for result in results {
+        let payload = GradeWritePayload {
+            score: result.total_score,
+            feedback: result.feedback_summary.clone(),
+            rubric_results: result.criteria_results.iter().map(|c| CriterionResultPayload {
+                criterion_id: c.criterion_id.clone(),
+                score: c.score,
+                feedback: c.feedback.clone(),
+            }).collect(),
+            evaluated_at: result.evaluated_at.to_rfc3339(),
+        };
+
+        workspace_client.write_grade(result.submission_id, payload).await?;
+    }
+
+    Ok(())
+}
+
 pub fn map_aggregator_error(e: AggregatorError) -> Status {
     match e {
         AggregatorError::AssignmentNotClosed { id } => {
@@ -220,4 +253,8 @@ pub fn map_user_config_error(e: UserConfigClientError) -> Status {
 
 pub fn map_suggestion_cache_error(e: SuggestionCacheError) -> Status {
     Status::internal(format!("suggestion cache error: {}", e))
+}
+
+pub fn map_workspace_client_error(e: WorkspaceClientError) -> Status {
+    Status::internal(format!("workspace persistence error: {}", e))
 }
