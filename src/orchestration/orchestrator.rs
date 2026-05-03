@@ -1,7 +1,7 @@
 // orchestration/orchestrator.rs
 
 use crate::application::workflows::grading::grading_workflow::GradingWorkflow;
-use crate::domain::ports::llm_provider::LlmProvider;
+use crate::domain::ports::llm_provider::{LlmError, LlmProvider};
 use crate::models::context::assignment_context::AssignmentContext;
 use crate::models::context::submission_context::GradingContext;
 use crate::models::grading::grading_result::GradingResult;
@@ -12,7 +12,7 @@ use thiserror::Error;
 #[derive(Debug, Error)]
 pub enum OrchestratorError {
     #[error("grading failed: {0}")]
-    GradingFailed(String),
+    GradingFailed(#[from] LlmError),
 
     #[error("workflow not implemented for MVP: {0}")]
     NotImplemented(String),
@@ -59,6 +59,6 @@ impl Orchestrator {
         workflow
             .run(assignment, context)
             .await
-            .map_err(|e| OrchestratorError::GradingFailed(e.to_string()))
+            .map_err(OrchestratorError::from)
     }
 }
