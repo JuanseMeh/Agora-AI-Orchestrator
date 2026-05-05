@@ -13,8 +13,11 @@ use std::sync::Arc;
 use integration::gemini::client::GeminiClient;
 use orchestration::orchestrator::Orchestrator;
 use context::aggregator::ContextAggregator;
-use api::handlers::grading_handler::GradingHandler;
+use context::suggestion_cache::SuggestionCache;
+use context::user_config_client::UserConfigClient;
+use context::workspace_client::WorkspaceClient;
 use dotenvy;
+use std::time::Duration;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -30,12 +33,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let provider = GeminiClient::from_env()?;
     let orchestrator = Arc::new(Orchestrator::new(Arc::new(provider)));
     let aggregator = Arc::new(ContextAggregator::from_env()?);
+    let workspace_client = Arc::new(WorkspaceClient::from_env()?);
+    let user_config_client = Arc::new(UserConfigClient::from_env()?);
+    let ttl_hours = std::env::var("SUGGESTION_TTL_HOURS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(24);
+    let suggestion_cache = Arc::new(
+        SuggestionCache::from_env(Duration::from_secs(ttl_hours * 3600))?
+    );
 
     tracing::info!("AI service starting up");
     tracing::info!("Gemini provider initialized");
     tracing::info!("Context aggregator initialized");
+    tracing::info!("Workspace client initialized");
+    tracing::info!("User config client initialized");
+    tracing::info!("Suggestion cache initialized (Redis)");
 
-    api::server::serve(orchestrator, aggregator).await?;
+    api::server::serve(
+        orchestrator,
+        aggregator,
+        user_config_client,
+        suggestion_cache,
+        workspace_client,
+    ).await?;
 
     Ok(())
 }

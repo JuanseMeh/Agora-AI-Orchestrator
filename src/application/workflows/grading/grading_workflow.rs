@@ -7,7 +7,15 @@ use crate::models::context::assignment_context::AssignmentContext;
 use crate::models::context::submission_context::GradingContext;
 use crate::models::grading::grading_result::GradingResult;
 
-const GRADING_MODEL: &str = "gemini-2.0-flash";
+const DEFAULT_GRADING_MODEL: &str = "gemini-2.0-flash";
+
+fn grading_model() -> String {
+    std::env::var("GEMINI_MODEL")
+        .ok()
+        .map(|m| m.trim().to_string())
+        .filter(|m| !m.is_empty())
+        .unwrap_or_else(|| DEFAULT_GRADING_MODEL.to_string())
+}
 
 /// Orchestrates the full grading pipeline for one assignment.
 ///
@@ -37,6 +45,7 @@ impl<'a> GradingWorkflow<'a> {
     ) -> Result<Vec<GradingResult>, LlmError> {
         let evaluator = EvaluateCriteria::new(self.provider);
         let mut results = Vec::with_capacity(context.submission_count());
+        let grading_model = grading_model();
 
         for submission in &context.submissions {
             let criteria_results = evaluator
@@ -47,7 +56,7 @@ impl<'a> GradingWorkflow<'a> {
                 submission,
                 &assignment.rubric,
                 criteria_results,
-                GRADING_MODEL,
+                &grading_model,
             );
 
             results.push(grading_result);

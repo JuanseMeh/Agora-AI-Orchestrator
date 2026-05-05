@@ -1,5 +1,7 @@
 use async_trait::async_trait;
 use reqwest::Client;
+use std::time::Duration;
+use tracing::error;
 use crate::domain::ports::llm_provider::{LlmError, LlmProvider};
 use crate::models::grading::grading_result::CriterionResult;
 use crate::integration::gemini::error::GeminiError;
@@ -8,7 +10,8 @@ use crate::integration::gemini::response_parser::ResponseParser;
 use crate::integration::gemini::types::{GeminiErrorResponse, GeminiResponse};
 
 const GEMINI_API_BASE: &str =
-    "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent";
+    "https://generativelanguage.googleapis.com/v1beta/models";
+const DEFAULT_GEMINI_MODEL: &str = "gemini-2.0-flash";
 
 /// Gemini implementation of `LlmProvider`.
 ///
@@ -17,6 +20,7 @@ const GEMINI_API_BASE: &str =
 pub struct GeminiClient {
     client: Client,
     api_key: String,
+    model: String,
 }
 
 impl GeminiClient {
@@ -35,15 +39,31 @@ impl GeminiClient {
                 "GEMINI_API_KEY is empty".to_string()
             ));
         }
+        let model = std::env::var("GEMINI_MODEL")
+            .ok()
+            .map(|m| m.trim().to_string())
+            .filter(|m| !m.is_empty())
+            .unwrap_or_else(|| DEFAULT_GEMINI_MODEL.to_string());
+        let client = Client::builder()
+            .no_proxy()
+            .http1_only()
+            .connect_timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(45))
+            .build()
+            .map_err(|e| GeminiError::Configuration(format!("failed to build http client: {}", e)))?;
 
         Ok(Self {
-            client: Client::new(),
+            client,
             api_key,
+            model,
         })
     }
 
     fn endpoint_url(&self) -> String {
-        format!("{}?key={}", GEMINI_API_BASE, self.api_key)
+        format!(
+            "{}/{}:generateContent?key={}",
+            GEMINI_API_BASE, self.model, self.api_key
+        )
     }
 
     async fn send(&self, prompt: String) -> Result<CriterionResult, GeminiError> {
@@ -54,7 +74,18 @@ impl GeminiClient {
             .post(self.endpoint_url())
             .json(&request_body)
             .send()
-            .await?;
+            .await
+            .map_err(|e| {
+                error!(
+                    error = %e,
+                    is_connect = e.is_connect(),
+                    is_timeout = e.is_timeout(),
+                    is_request = e.is_request(),
+                    is_body = e.is_body(),
+                    "gemini request failed"
+                );
+                GeminiError::Network(e)
+            })?;
 
         let status = response.status();
 
@@ -62,7 +93,10 @@ impl GeminiClient {
             let error_body = response
                 .json::<GeminiErrorResponse>()
                 .await
-                .map_err(|e| GeminiError::Deserialization(e.to_string()))?;
+                .map_err(|e| {
+                    error!(error = %e, status = %status, "failed to parse gemini api error response");
+                    GeminiError::Deserialization(e.to_string())
+                })?;
 
             return Err(GeminiError::from_api_detail(error_body.error));
         }

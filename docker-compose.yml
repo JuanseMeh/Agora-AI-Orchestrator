@@ -1,0 +1,50 @@
+version: "3.9"
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: ai-orchestrator-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  ai-orchestrator:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ai-orchestrator
+    restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
+    ports:
+      - "50051:50051"
+    env_file: .env
+    environment:
+      GRPC_PORT: ${GRPC_PORT}
+      REDIS_URL: ${REDIS_URL}
+      SUGGESTION_TTL_HOURS: ${SUGGESTION_TTL_HOURS}
+      WORKSPACE_SERVICE_URL: ${WORKSPACE_SERVICE_URL}
+      USER_SERVICE_URL: ${USER_SERVICE_URL}
+      GEMINI_API_KEY: ${GEMINI_API_KEY}
+      GEMINI_MODEL: ${GEMINI_MODEL}
+      RUST_LOG: ${RUST_LOG}
+
+    networks:
+      - agora-network
+
+volumes:
+  redis_data:
+
+networks:
+  agora-network:
+    external: true
+    name: agora-network
