@@ -9,6 +9,7 @@ use crate::models::grading::rubric::{Rubric, RubricCriterion, ScoringLevel};
 use serde_json::Value;
 use thiserror::Error;
 use uuid::Uuid;
+use std::collections::HashSet;
 
 #[derive(Debug, Error)]
 pub enum AggregatorError {
@@ -26,6 +27,16 @@ pub enum AggregatorError {
 
     #[error("failed to extract submission content for submission {submission_id}")]
     ContentExtractionFailed { submission_id: i32 },
+
+    #[error("invalid user id filter: {value}")]
+    InvalidUserFilter { value: String },
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct SubmissionFilter {
+    pub submission_ids: Vec<i32>,
+    pub user_ids: Vec<Uuid>,
+    pub include_already_graded: bool,
 }
 
 /// Assembles a `GradingContext` from raw Workspace Service data.
@@ -55,6 +66,15 @@ impl ContextAggregator {
         &self,
         assignment_id: i32,
     ) -> Result<(AssignmentContext, GradingContext), AggregatorError> {
+        self.build_grading_context_with_filter(assignment_id, &SubmissionFilter::default())
+            .await
+    }
+
+    pub async fn build_grading_context_with_filter(
+        &self,
+        assignment_id: i32,
+        filter: &SubmissionFilter,
+    ) -> Result<(AssignmentContext, GradingContext), AggregatorError> {
         let raw_assignment = self.client.fetch_assignment(assignment_id).await?;
 
         // status 2 = Cerrado — only closed assignments can be graded
@@ -63,18 +83,19 @@ impl ContextAggregator {
         // }
 
         let raw_submissions = self.client.fetch_submissions(assignment_id).await?;
-
-        if raw_submissions.is_empty() {
-            return Err(AggregatorError::NoSubmissions { assignment_id });
-        }
+        let filtered_submissions = self.apply_submission_filter(raw_submissions, filter);
 
         let assignment_context = self.map_assignment(&raw_assignment)?;
         let workspace_id = raw_assignment.workspace_id;
 
-        let submission_contexts = raw_submissions
+        let submission_contexts = filtered_submissions
             .iter()
             .map(|s| self.map_submission(s))
             .collect::<Result<Vec<_>, _>>()?;
+
+        if submission_contexts.is_empty() {
+            return Err(AggregatorError::NoSubmissions { assignment_id });
+        }
 
         let grading_context = GradingContext::new(
             assignment_id,
@@ -83,6 +104,55 @@ impl ContextAggregator {
         );
 
         Ok((assignment_context, grading_context))
+    }
+
+    pub fn parse_user_filters(values: &[String]) -> Result<Vec<Uuid>, AggregatorError> {
+        values
+            .iter()
+            .map(|value| {
+                Uuid::parse_str(value)
+                    .map_err(|_| AggregatorError::InvalidUserFilter { value: value.clone() })
+            })
+            .collect()
+    }
+
+    fn apply_submission_filter(
+        &self,
+        submissions: Vec<SubmissionResponse>,
+        filter: &SubmissionFilter,
+    ) -> Vec<SubmissionResponse> {
+        let submission_id_set: HashSet<i32> = filter.submission_ids.iter().copied().collect();
+        let user_id_set: HashSet<Uuid> = filter.user_ids.iter().copied().collect();
+
+        submissions
+            .into_iter()
+            .filter(|s| {
+                if !submission_id_set.is_empty() && !submission_id_set.contains(&s.id) {
+                    return false;
+                }
+
+                if !user_id_set.is_empty() && !user_id_set.contains(&s.user_id) {
+                    return false;
+                }
+
+                if !filter.include_already_graded && Self::is_already_graded(s.ai_result.as_ref()) {
+                    return false;
+                }
+
+                true
+            })
+            .collect()
+    }
+
+    fn is_already_graded(ai_result: Option<&Value>) -> bool {
+        let Some(result) = ai_result else {
+            return false;
+        };
+
+        result
+            .get("ai")
+            .and_then(|ai| ai.get("score"))
+            .is_some()
     }
 
     /// Maps a raw `AssignmentResponse` onto `AssignmentContext`.

@@ -8,7 +8,7 @@ use crate::api::proto::{
     GradingResult as ProtoGradingResult,
     CriterionResult as ProtoCriterionResult,
 };
-use crate::context::aggregator::{ContextAggregator, AggregatorError};
+use crate::context::aggregator::{ContextAggregator, AggregatorError, SubmissionFilter};
 use crate::context::suggestion_cache::{SuggestionCache, SuggestionCacheEntry, SuggestionCacheError};
 use crate::context::user_config_client::{UserConfigClient, UserConfigClientError};
 use crate::context::workspace_client::{WorkspaceClient, WorkspaceClientError, GradeWritePayload, CriterionResultPayload};
@@ -58,8 +58,16 @@ impl AiService for GradingHandler {
             return Err(Status::failed_precondition("agentic mode is disabled for this user"));
         }
 
+        let user_ids = ContextAggregator::parse_user_filters(&req.user_ids)
+            .map_err(map_aggregator_error)?;
+        let filter = SubmissionFilter {
+            submission_ids: req.submission_ids.clone(),
+            user_ids,
+            include_already_graded: req.include_already_graded,
+        };
+
         let (assignment, context) = self.aggregator
-            .build_grading_context(req.assignment_id)
+            .build_grading_context_with_filter(req.assignment_id, &filter)
             .await
             .map_err(map_aggregator_error)?;
 
@@ -129,9 +137,16 @@ impl AiService for GradingHandler {
         request: Request<GradeAssignmentRequest>,
     ) -> Result<Response<GradeAssignmentResponse>, Status> {
         let req = request.into_inner();
+        let user_ids = ContextAggregator::parse_user_filters(&req.user_ids)
+            .map_err(map_aggregator_error)?;
+        let filter = SubmissionFilter {
+            submission_ids: req.submission_ids.clone(),
+            user_ids,
+            include_already_graded: req.include_already_graded,
+        };
 
         let (assignment, context) = self.aggregator
-            .build_grading_context(req.assignment_id)
+            .build_grading_context_with_filter(req.assignment_id, &filter)
             .await
             .map_err(map_aggregator_error)?;
 
@@ -233,6 +248,9 @@ pub fn map_aggregator_error(e: AggregatorError) -> Status {
         }
         AggregatorError::ContentExtractionFailed { submission_id } => {
             Status::internal(format!("content extraction failed for submission {}", submission_id))
+        }
+        AggregatorError::InvalidUserFilter { value } => {
+            Status::invalid_argument(format!("invalid user_id in filter: {}", value))
         }
     }
 }
