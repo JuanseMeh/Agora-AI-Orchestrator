@@ -108,6 +108,67 @@ impl GeminiClient {
 
         ResponseParser::parse(gemini_response)
     }
+
+    async fn send_text(&self, prompt: String) -> Result<String, GeminiError> {
+        tracing::debug!("gemini send_text prompt_len={}", prompt.len());
+
+        let request_body = serde_json::json!({
+            "contents": [{
+                "role": "user",
+                "parts": [{ "text": prompt }]
+            }],
+            "generationConfig": {
+                "temperature": 0.3,
+                "maxOutputTokens": 2000
+            }
+        });
+
+        let response = self
+            .client
+            .post(self.endpoint_url())
+            .json(&request_body)
+            .send()
+            .await
+            .map_err(|e| {
+                error!(
+                    error = %e,
+                    is_connect = e.is_connect(),
+                    is_timeout = e.is_timeout(),
+                    is_request = e.is_request(),
+                    is_body = e.is_body(),
+                    "gemini text request failed"
+                );
+                GeminiError::Network(e)
+            })?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let error_body = response
+                .json::<GeminiErrorResponse>()
+                .await
+                .map_err(|e| GeminiError::Deserialization(e.to_string()))?;
+            return Err(GeminiError::from_api_detail(error_body.error));
+        }
+
+        let gemini_response = response
+            .json::<GeminiResponse>()
+            .await
+            .map_err(|e| GeminiError::Deserialization(e.to_string()))?;
+
+        // Log diagnostic info: finish reasons and returned text length
+        let finish_reasons: Vec<Option<String>> = gemini_response
+            .candidates
+            .iter()
+            .map(|c| c.finish_reason.clone())
+            .collect();
+
+        let text_opt = gemini_response.extract_text();
+        tracing::debug!("gemini send_text finish_reasons={:?} text_len={}", finish_reasons, text_opt.map(|t| t.len()).unwrap_or(0));
+
+        let text = text_opt.ok_or(GeminiError::EmptyResponse)?;
+
+        Ok(text.to_string())
+    }
 }
 
 #[async_trait]
@@ -117,6 +178,15 @@ impl LlmProvider for GeminiClient {
         prompt: String,
     ) -> Result<CriterionResult, LlmError> {
         self.send(prompt)
+            .await
+            .map_err(LlmError::from)
+    }
+
+    async fn generate_text(
+        &self,
+        prompt: String,
+    ) -> Result<String, LlmError> {
+        self.send_text(prompt)
             .await
             .map_err(LlmError::from)
     }

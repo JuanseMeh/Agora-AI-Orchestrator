@@ -9,6 +9,7 @@ use crate::context::aggregator::ContextAggregator;
 use crate::context::suggestion_cache::SuggestionCache;
 use crate::context::user_config_client::UserConfigClient;
 use crate::context::workspace_client::WorkspaceClient;
+use crate::domain::ports::llm_provider::LlmProvider;
 
 pub async fn serve(
     orchestrator: Arc<Orchestrator>,
@@ -16,6 +17,7 @@ pub async fn serve(
     user_config_client: Arc<UserConfigClient>,
     suggestion_cache: Arc<SuggestionCache>,
     workspace_client: Arc<WorkspaceClient>,
+    provider: Arc<dyn LlmProvider>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let port = std::env::var("GRPC_PORT").unwrap_or_else(|_| "50051".to_string());
     let addr = format!("0.0.0.0:{}", port).parse()?;
@@ -26,6 +28,7 @@ pub async fn serve(
         user_config_client,
         suggestion_cache,
         workspace_client,
+        provider,
     );
     let service = AiServiceServer::new(handler);
 

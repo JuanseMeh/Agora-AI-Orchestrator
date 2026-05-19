@@ -17,6 +17,9 @@ pub enum WorkspaceClientError {
     #[error("submissions not found for assignment: {assignment_id}")]
     SubmissionsNotFound { assignment_id: i32 },
 
+    #[error("performance data not found for workspace: {workspace_id}")]
+    PerformanceDataNotFound { workspace_id: i32 },
+
     #[error("workspace service error {status}: {message}")]
     ServiceError { status: u16, message: String },
 
@@ -74,6 +77,50 @@ pub struct CriterionResultPayload {
     pub criterion_id: String,
     pub score: f64,
     pub feedback: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PerformanceDataResponse {
+    pub workspace_id: i32,
+    pub assignment_id: Option<i32>,
+    pub summary: PerformanceSummary,
+    pub assignments: Vec<AssignmentPerformanceMetric>,
+    pub students: Vec<StudentPerformanceMetric>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PerformanceSummary {
+    pub total_assignments: i32,
+    pub total_submissions: i32,
+    pub graded_submissions: i32,
+    pub pending_submissions: i32,
+    pub average_score: f64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AssignmentPerformanceMetric {
+    pub assignment_id: i32,
+    pub assignment_name: String,
+    pub total_submissions: i32,
+    pub graded_submissions: i32,
+    pub pending_submissions: i32,
+    pub average_score: f64,
+    pub max_score: f64,
+    pub failed_submissions: i32,
+    pub failure_rate: f64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StudentPerformanceMetric {
+    pub user_id: uuid::Uuid,
+    pub total_submissions: i32,
+    pub graded_submissions: i32,
+    pub pending_submissions: i32,
+    pub average_score: f64,
 }
 
 /// HTTP client scoped to the Workspace Service.
@@ -177,6 +224,41 @@ impl WorkspaceClient {
         }
 
         Ok(())
+    }
+
+    /// Fetches workspace/assignment performance dataset for analytics reporting.
+    pub async fn fetch_performance_data(
+        &self,
+        workspace_id: i32,
+        assignment_id: Option<i32>,
+    ) -> Result<PerformanceDataResponse, WorkspaceClientError> {
+        let mut url = format!(
+            "{}/internal/reports/workspaces/{}/performance-data",
+            self.base_url, workspace_id
+        );
+
+        if let Some(value) = assignment_id {
+            url = format!("{}?assignmentId={}", url, value);
+        }
+
+        let response = self.client.get(&url).send().await?;
+        let status = response.status();
+
+        if status.as_u16() == 404 {
+            return Err(WorkspaceClientError::PerformanceDataNotFound { workspace_id });
+        }
+
+        if !status.is_success() {
+            return Err(WorkspaceClientError::ServiceError {
+                status: status.as_u16(),
+                message: response.text().await.unwrap_or_default(),
+            });
+        }
+
+        response
+            .json::<PerformanceDataResponse>()
+            .await
+            .map_err(|e| WorkspaceClientError::Deserialization(e.to_string()))
     }
 
 }
