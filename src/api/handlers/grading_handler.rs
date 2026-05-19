@@ -4,15 +4,19 @@ use crate::api::proto::ai_service_server::AiService;
 use crate::api::proto::{
     ApproveSuggestionRequest, ApproveSuggestionResponse,
     GradeAssignmentRequest, GradeAssignmentResponse,
+    GeneratePerformanceReportRequest, GeneratePerformanceReportResponse,
+    AssignmentPerformance as ProtoAssignmentPerformance,
+    StudentPerformance as ProtoStudentPerformance,
     SuggestAssignmentRequest, SuggestAssignmentResponse, SuggestionStats,
     GradingResult as ProtoGradingResult,
     CriterionResult as ProtoCriterionResult,
 };
+use crate::application::prompts::performance_report_prompt::PerformanceReportPromptBuilder;
 use crate::context::aggregator::{ContextAggregator, AggregatorError, SubmissionFilter};
 use crate::context::suggestion_cache::{SuggestionCache, SuggestionCacheEntry, SuggestionCacheError};
 use crate::context::user_config_client::{UserConfigClient, UserConfigClientError};
 use crate::context::workspace_client::{WorkspaceClient, WorkspaceClientError, GradeWritePayload, CriterionResultPayload};
-use crate::domain::ports::llm_provider::LlmError;
+use crate::domain::ports::llm_provider::{LlmError, LlmProvider};
 use crate::orchestration::orchestrator::{Orchestrator, OrchestratorError};
 use crate::orchestration::intent_router::OrchestratorRequest;
 use crate::models::grading::grading_result::GradingResult;
@@ -25,6 +29,7 @@ pub struct GradingHandler {
     user_config_client: Arc<UserConfigClient>,
     suggestion_cache: Arc<SuggestionCache>,
     workspace_client: Arc<WorkspaceClient>,
+    provider: Arc<dyn LlmProvider>,
 }
 
 impl GradingHandler {
@@ -34,8 +39,16 @@ impl GradingHandler {
         user_config_client: Arc<UserConfigClient>,
         suggestion_cache: Arc<SuggestionCache>,
         workspace_client: Arc<WorkspaceClient>,
+        provider: Arc<dyn LlmProvider>,
     ) -> Self {
-        Self { orchestrator, aggregator, user_config_client, suggestion_cache, workspace_client }
+        Self {
+            orchestrator,
+            aggregator,
+            user_config_client,
+            suggestion_cache,
+            workspace_client,
+            provider,
+        }
     }
 }
 
@@ -170,6 +183,91 @@ impl AiService for GradingHandler {
             results: proto_results,
         }))
     }
+
+    async fn generate_performance_report(
+        &self,
+        request: Request<GeneratePerformanceReportRequest>,
+    ) -> Result<Response<GeneratePerformanceReportResponse>, Status> {
+        let req = request.into_inner();
+
+        let dataset = self.workspace_client
+            .fetch_performance_data(req.workspace_id, req.assignment_id)
+            .await
+            .map_err(map_workspace_client_error)?;
+
+        let dataset_json = serde_json::to_string(&serde_json::json!({
+            "workspaceId": dataset.workspace_id,
+            "assignmentId": dataset.assignment_id,
+            "summary": {
+                "totalAssignments": dataset.summary.total_assignments,
+                "totalSubmissions": dataset.summary.total_submissions,
+                "gradedSubmissions": dataset.summary.graded_submissions,
+                "pendingSubmissions": dataset.summary.pending_submissions,
+                "averageScore": dataset.summary.average_score,
+            },
+            "assignments": dataset.assignments.iter().map(|a| serde_json::json!({
+                "assignmentId": a.assignment_id,
+                "assignmentName": a.assignment_name,
+                "totalSubmissions": a.total_submissions,
+                "gradedSubmissions": a.graded_submissions,
+                "pendingSubmissions": a.pending_submissions,
+                "averageScore": a.average_score,
+                "maxScore": a.max_score,
+                "failedSubmissions": a.failed_submissions,
+                "failureRate": a.failure_rate,
+            })).collect::<Vec<_>>(),
+            "students": dataset.students.iter().map(|s| serde_json::json!({
+                "userId": s.user_id,
+                "totalSubmissions": s.total_submissions,
+                "gradedSubmissions": s.graded_submissions,
+                "pendingSubmissions": s.pending_submissions,
+                "averageScore": s.average_score,
+            })).collect::<Vec<_>>(),
+        }))
+            .map_err(|e| Status::internal(format!("failed to serialize dataset: {}", e)))?;
+
+        let prompt = PerformanceReportPromptBuilder::build(
+            req.workspace_id,
+            req.assignment_id,
+            &dataset_json,
+        );
+
+        let ai_analysis = self.provider
+            .generate_text(prompt)
+            .await
+            .map_err(map_llm_error)?;
+
+        let response = GeneratePerformanceReportResponse {
+            workspace_id: dataset.workspace_id,
+            assignment_id: dataset.assignment_id,
+            total_assignments: dataset.summary.total_assignments,
+            total_submissions: dataset.summary.total_submissions,
+            graded_submissions: dataset.summary.graded_submissions,
+            pending_submissions: dataset.summary.pending_submissions,
+            average_score: dataset.summary.average_score,
+            ai_analysis,
+            assignments: dataset.assignments.into_iter().map(|assignment| ProtoAssignmentPerformance {
+                assignment_id: assignment.assignment_id,
+                assignment_name: assignment.assignment_name,
+                total_submissions: assignment.total_submissions,
+                graded_submissions: assignment.graded_submissions,
+                pending_submissions: assignment.pending_submissions,
+                average_score: assignment.average_score,
+                max_score: assignment.max_score,
+                failed_submissions: assignment.failed_submissions,
+                failure_rate: assignment.failure_rate,
+            }).collect(),
+            students: dataset.students.into_iter().map(|student| ProtoStudentPerformance {
+                user_id: student.user_id.to_string(),
+                total_submissions: student.total_submissions,
+                graded_submissions: student.graded_submissions,
+                pending_submissions: student.pending_submissions,
+                average_score: student.average_score,
+            }).collect(),
+        };
+
+        Ok(Response::new(response))
+    }
 }
 
 fn to_stats(results: &[GradingResult]) -> SuggestionStats {
@@ -274,5 +372,12 @@ pub fn map_suggestion_cache_error(e: SuggestionCacheError) -> Status {
 }
 
 pub fn map_workspace_client_error(e: WorkspaceClientError) -> Status {
-    Status::internal(format!("workspace persistence error: {}", e))
+    Status::internal(format!("workspace service error: {}", e))
+}
+
+pub fn map_llm_error(e: LlmError) -> Status {
+    match e {
+        LlmError::ProviderError { status: 429, message } => Status::resource_exhausted(message),
+        other => Status::internal(other.to_string()),
+    }
 }

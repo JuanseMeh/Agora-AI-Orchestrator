@@ -17,6 +17,12 @@ pub trait LlmProvider: Send + Sync {
         &self,
         prompt: String,
     ) -> Result<CriterionResult, LlmError>;
+
+    /// Generates free-form text for analytics/reporting tasks.
+    async fn generate_text(
+        &self,
+        prompt: String,
+    ) -> Result<String, LlmError>;
 }
 
 /// Provider-agnostic error type.

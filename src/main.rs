@@ -30,8 +30,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         dotenvy::dotenv().ok();
 
-    let provider = GeminiClient::from_env()?;
-    let orchestrator = Arc::new(Orchestrator::new(Arc::new(provider)));
+    let provider = Arc::new(GeminiClient::from_env()?);
+    let orchestrator = Arc::new(Orchestrator::new(provider.clone()));
     let aggregator = Arc::new(ContextAggregator::from_env()?);
     let workspace_client = Arc::new(WorkspaceClient::from_env()?);
     let user_config_client = Arc::new(UserConfigClient::from_env()?);
@@ -56,6 +56,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         user_config_client,
         suggestion_cache,
         workspace_client,
+        provider,
     ).await?;
 
     Ok(())

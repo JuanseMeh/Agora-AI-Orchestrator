@@ -6,6 +6,7 @@ service AiService {
   rpc SuggestAssignment (SuggestAssignmentRequest) returns (SuggestAssignmentResponse);
   rpc ApproveSuggestion (ApproveSuggestionRequest) returns (ApproveSuggestionResponse);
   rpc GradeAssignment (GradeAssignmentRequest) returns (GradeAssignmentResponse);
+  rpc GeneratePerformanceReport (GeneratePerformanceReportRequest) returns (GeneratePerformanceReportResponse);
 }
 
 message SuggestAssignmentRequest {
@@ -68,4 +69,42 @@ message GradingResult {
 
 message GradeAssignmentResponse {
   repeated GradingResult results = 1;
+}
+
+message GeneratePerformanceReportRequest {
+  int32 workspace_id = 1;
+  optional int32 assignment_id = 2;
+}
+
+message AssignmentPerformance {
+  int32 assignment_id = 1;
+  string assignment_name = 2;
+  int32 total_submissions = 3;
+  int32 graded_submissions = 4;
+  int32 pending_submissions = 5;
+  double average_score = 6;
+  double max_score = 7;
+  int32 failed_submissions = 8;
+  double failure_rate = 9;
+}
+
+message StudentPerformance {
+  string user_id = 1;
+  int32 total_submissions = 2;
+  int32 graded_submissions = 3;
+  int32 pending_submissions = 4;
+  double average_score = 5;
+}
+
+message GeneratePerformanceReportResponse {
+  int32 workspace_id = 1;
+  optional int32 assignment_id = 2;
+  int32 total_assignments = 3;
+  int32 total_submissions = 4;
+  int32 graded_submissions = 5;
+  int32 pending_submissions = 6;
+  double average_score = 7;
+  string ai_analysis = 8;
+  repeated AssignmentPerformance assignments = 9;
+  repeated StudentPerformance students = 10;
 }
