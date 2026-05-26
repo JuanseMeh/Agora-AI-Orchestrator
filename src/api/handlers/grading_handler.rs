@@ -12,7 +12,7 @@ use crate::api::proto::{
     CriterionResult as ProtoCriterionResult,
 };
 use crate::application::prompts::performance_report_prompt::PerformanceReportPromptBuilder;
-use crate::context::aggregator::{ContextAggregator, AggregatorError, SubmissionFilter};
+use crate::context::aggregator::{ContextAggregator, SubmissionFilter};
 use crate::context::suggestion_cache::{SuggestionCache, SuggestionCacheEntry, SuggestionCacheError};
 use crate::context::user_config_client::{UserConfigClient, UserConfigClientError};
 use crate::context::workspace_client::{WorkspaceClient, WorkspaceClientError, GradeWritePayload, CriterionResultPayload};
@@ -25,7 +25,6 @@ use uuid::Uuid;
 
 pub struct GradingHandler {
     orchestrator: Arc<Orchestrator>,
-    aggregator: Arc<ContextAggregator>,
     user_config_client: Arc<UserConfigClient>,
     suggestion_cache: Arc<SuggestionCache>,
     workspace_client: Arc<WorkspaceClient>,
@@ -35,7 +34,6 @@ pub struct GradingHandler {
 impl GradingHandler {
     pub fn new(
         orchestrator: Arc<Orchestrator>,
-        aggregator: Arc<ContextAggregator>,
         user_config_client: Arc<UserConfigClient>,
         suggestion_cache: Arc<SuggestionCache>,
         workspace_client: Arc<WorkspaceClient>,
@@ -43,7 +41,6 @@ impl GradingHandler {
     ) -> Self {
         Self {
             orchestrator,
-            aggregator,
             user_config_client,
             suggestion_cache,
             workspace_client,
@@ -72,17 +69,12 @@ impl AiService for GradingHandler {
         }
 
         let user_ids = ContextAggregator::parse_user_filters(&req.user_ids)
-            .map_err(map_aggregator_error)?;
+            .map_err(|e| Status::invalid_argument(format!("invalid user_id in filter: {}", e)))?;
         let filter = SubmissionFilter {
             submission_ids: req.submission_ids.clone(),
             user_ids,
             include_already_graded: req.include_already_graded,
         };
-
-        let (assignment, context) = self.aggregator
-            .build_grading_context_with_filter(req.assignment_id, &filter)
-            .await
-            .map_err(map_aggregator_error)?;
 
         let orchestrator_request = OrchestratorRequest::GradeAssignment {
             workspace_id: req.workspace_id,
@@ -90,7 +82,7 @@ impl AiService for GradingHandler {
         };
 
         let results = self.orchestrator
-            .dispatch(orchestrator_request, &assignment, &context)
+            .dispatch(&orchestrator_request, &filter, false)
             .await
             .map_err(map_orchestrator_error)?;
 
@@ -151,17 +143,12 @@ impl AiService for GradingHandler {
     ) -> Result<Response<GradeAssignmentResponse>, Status> {
         let req = request.into_inner();
         let user_ids = ContextAggregator::parse_user_filters(&req.user_ids)
-            .map_err(map_aggregator_error)?;
+            .map_err(|e| Status::invalid_argument(format!("invalid user_id in filter: {}", e)))?;
         let filter = SubmissionFilter {
             submission_ids: req.submission_ids.clone(),
             user_ids,
             include_already_graded: req.include_already_graded,
         };
-
-        let (assignment, context) = self.aggregator
-            .build_grading_context_with_filter(req.assignment_id, &filter)
-            .await
-            .map_err(map_aggregator_error)?;
 
         let orchestrator_request = OrchestratorRequest::GradeAssignment {
             workspace_id: req.workspace_id,
@@ -169,13 +156,9 @@ impl AiService for GradingHandler {
         };
 
         let results = self.orchestrator
-            .dispatch(orchestrator_request, &assignment, &context)
+            .dispatch(&orchestrator_request, &filter, true)
             .await
             .map_err(map_orchestrator_error)?;
-
-        persist_results(&self.workspace_client, &results)
-            .await
-            .map_err(map_workspace_client_error)?;
 
         let proto_results = results.into_iter().map(into_proto_result).collect();
 
@@ -330,36 +313,13 @@ async fn persist_results(
     Ok(())
 }
 
-pub fn map_aggregator_error(e: AggregatorError) -> Status {
-    match e {
-        AggregatorError::AssignmentNotClosed { id } => {
-            Status::failed_precondition(format!("assignment {} is not closed", id))
-        }
-        AggregatorError::NoSubmissions { assignment_id } => {
-            Status::not_found(format!("no submissions for assignment {}", assignment_id))
-        }
-        AggregatorError::WorkspaceClient(e) => {
-            Status::internal(e.to_string())
-        }
-        AggregatorError::RubricParseFailed { assignment_id, reason } => {
-            Status::internal(format!("rubric parse failed for {}: {}", assignment_id, reason))
-        }
-        AggregatorError::ContentExtractionFailed { submission_id } => {
-            Status::internal(format!("content extraction failed for submission {}", submission_id))
-        }
-        AggregatorError::InvalidUserFilter { value } => {
-            Status::invalid_argument(format!("invalid user_id in filter: {}", value))
-        }
-    }
-}
-
 pub fn map_orchestrator_error(e: OrchestratorError) -> Status {
     match e {
-        OrchestratorError::GradingFailed(LlmError::ProviderError { status: 429, message }) => {
-            Status::resource_exhausted(message)
-        }
-        OrchestratorError::GradingFailed(err) => Status::internal(err.to_string()),
         OrchestratorError::NotImplemented(msg) => Status::unimplemented(msg),
+        _ if e.is_rate_limited() => Status::resource_exhausted(e.to_string()),
+        OrchestratorError::WorkflowFailed(inner) => {
+            Status::internal(inner.to_string())
+        }
     }
 }
 

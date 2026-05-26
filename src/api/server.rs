@@ -1,11 +1,8 @@
-// api/server.rs
-
 use std::sync::Arc;
 use tonic::transport::Server;
 use crate::api::proto::ai_service_server::AiServiceServer;
 use crate::api::handlers::grading_handler::GradingHandler;
 use crate::orchestration::orchestrator::Orchestrator;
-use crate::context::aggregator::ContextAggregator;
 use crate::context::suggestion_cache::SuggestionCache;
 use crate::context::user_config_client::UserConfigClient;
 use crate::context::workspace_client::WorkspaceClient;
@@ -13,7 +10,6 @@ use crate::domain::ports::llm_provider::LlmProvider;
 
 pub async fn serve(
     orchestrator: Arc<Orchestrator>,
-    aggregator: Arc<ContextAggregator>,
     user_config_client: Arc<UserConfigClient>,
     suggestion_cache: Arc<SuggestionCache>,
     workspace_client: Arc<WorkspaceClient>,
@@ -24,7 +20,6 @@ pub async fn serve(
 
     let handler = GradingHandler::new(
         orchestrator,
-        aggregator,
         user_config_client,
         suggestion_cache,
         workspace_client,

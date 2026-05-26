@@ -1,5 +1,3 @@
-// orchestration/planners/grading_planner.rs
-
 use chrono::Utc;
 use uuid::Uuid;
 use crate::models::execution::execution_plan::{ExecutionPlan, WorkflowType};
@@ -9,15 +7,21 @@ use crate::models::execution::execution_step::ExecutionStep;
 ///
 /// The plan is deterministic — the same steps in the same order
 /// every time. No LLM involvement in planning for grading.
+/// When `persist` is false the `save_grades` step is omitted
+/// (used for the suggest-then-approve two-phase flow).
 pub struct GradingPlanner;
 
 impl GradingPlanner {
     /// Builds the execution plan for grading one assignment.
     ///
-    /// Steps mirror the static pipeline defined in the architecture docs:
-    /// retrieve → evaluate → aggregate → save
-    pub fn build(workspace_id: i32, assignment_id: i32) -> ExecutionPlan {
-        let steps = vec![
+    /// Steps mirror the static pipeline:
+    /// retrieve → evaluate → aggregate → [save if persist]
+    pub fn build(
+        workspace_id: i32,
+        assignment_id: i32,
+        persist: bool,
+    ) -> ExecutionPlan {
+        let mut steps = vec![
             ExecutionStep::new(
                 1,
                 "retrieve_assignment",
@@ -47,14 +51,17 @@ impl GradingPlanner {
                     "assignment_id": assignment_id,
                 }),
             ),
-            ExecutionStep::new(
+        ];
+
+        if persist {
+            steps.push(ExecutionStep::new(
                 5,
                 "save_grades",
                 serde_json::json!({
                     "assignment_id": assignment_id,
                 }),
-            ),
-        ];
+            ));
+        }
 
         ExecutionPlan {
             plan_id: Uuid::new_v4(),
