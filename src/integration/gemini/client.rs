@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use reqwest::Client;
 use std::time::Duration;
-use tracing::error;
+use tracing::{error, info};
 use crate::domain::ports::llm_provider::{LlmError, LlmProvider};
 use crate::models::grading::grading_result::CriterionResult;
 use crate::integration::gemini::error::GeminiError;
@@ -20,7 +20,7 @@ const DEFAULT_GEMINI_MODEL: &str = "gemini-2.0-flash";
 pub struct GeminiClient {
     client: Client,
     api_key: String,
-    model: String,
+    pub model: String,
 }
 
 impl GeminiClient {
@@ -67,6 +67,12 @@ impl GeminiClient {
     }
 
     async fn send(&self, prompt: String) -> Result<CriterionResult, GeminiError> {
+        info!(
+            model = %self.model,
+            prompt_len = prompt.len(),
+            "gemini send — calling generateContent"
+        );
+
         let request_body = RequestBuilder::build(prompt);
 
         let response = self
@@ -98,6 +104,11 @@ impl GeminiClient {
                     GeminiError::Deserialization(e.to_string())
                 })?;
 
+            error!(
+                status = %status,
+                error_detail = ?error_body.error,
+                "gemini send — API error"
+            );
             return Err(GeminiError::from_api_detail(error_body.error));
         }
 
@@ -106,22 +117,28 @@ impl GeminiClient {
             .await
             .map_err(|e| GeminiError::Deserialization(e.to_string()))?;
 
+        let finish_reasons: Vec<Option<String>> = gemini_response
+            .candidates
+            .iter()
+            .map(|c| c.finish_reason.clone())
+            .collect();
+
+        info!(
+            "gemini send — success finish_reasons={:?}",
+            finish_reasons,
+        );
+
         ResponseParser::parse(gemini_response)
     }
 
     async fn send_text(&self, prompt: String) -> Result<String, GeminiError> {
-        tracing::debug!("gemini send_text prompt_len={}", prompt.len());
+        info!(
+            model = %self.model,
+            prompt_len = prompt.len(),
+            "gemini send_text — calling generateContent"
+        );
 
-        let request_body = serde_json::json!({
-            "contents": [{
-                "role": "user",
-                "parts": [{ "text": prompt }]
-            }],
-            "generationConfig": {
-                "temperature": 0.3,
-                "maxOutputTokens": 2000
-            }
-        });
+        let request_body = RequestBuilder::build(prompt);
 
         let response = self
             .client
@@ -136,17 +153,27 @@ impl GeminiClient {
                     is_timeout = e.is_timeout(),
                     is_request = e.is_request(),
                     is_body = e.is_body(),
-                    "gemini text request failed"
+                    "gemini send_text request failed"
                 );
                 GeminiError::Network(e)
             })?;
 
         let status = response.status();
+
         if !status.is_success() {
             let error_body = response
                 .json::<GeminiErrorResponse>()
                 .await
-                .map_err(|e| GeminiError::Deserialization(e.to_string()))?;
+                .map_err(|e| {
+                    error!(error = %e, status = %status, "failed to parse gemini api error response");
+                    GeminiError::Deserialization(e.to_string())
+                })?;
+
+            error!(
+                status = %status,
+                error_detail = ?error_body.error,
+                "gemini send_text — API error"
+            );
             return Err(GeminiError::from_api_detail(error_body.error));
         }
 
@@ -155,7 +182,6 @@ impl GeminiClient {
             .await
             .map_err(|e| GeminiError::Deserialization(e.to_string()))?;
 
-        // Log diagnostic info: finish reasons and returned text length
         let finish_reasons: Vec<Option<String>> = gemini_response
             .candidates
             .iter()
@@ -163,7 +189,11 @@ impl GeminiClient {
             .collect();
 
         let text_opt = gemini_response.extract_text();
-        tracing::debug!("gemini send_text finish_reasons={:?} text_len={}", finish_reasons, text_opt.map(|t| t.len()).unwrap_or(0));
+        info!(
+            "gemini send_text — success finish_reasons={:?} text_len={}",
+            finish_reasons,
+            text_opt.map(|t| t.len()).unwrap_or(0)
+        );
 
         let text = text_opt.ok_or(GeminiError::EmptyResponse)?;
 
