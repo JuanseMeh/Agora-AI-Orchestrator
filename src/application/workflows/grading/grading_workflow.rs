@@ -3,14 +3,18 @@ use std::sync::Arc;
 use futures::future::try_join_all;
 use thiserror::Error;
 use tokio::sync::Semaphore;
+use tracing::{info, warn};
+use uuid::Uuid;
 
 use crate::application::workflows::grading::steps::aggregate_scores::AggregateScores;
 use crate::application::workflows::grading::steps::evaluate_criteria::EvaluateCriteria;
 use crate::context::aggregator::{AggregatorError, ContextAggregator, SubmissionFilter};
-use crate::context::workspace_client::{WorkspaceClient, WorkspaceClientError, GradeWritePayload, CriterionResultPayload};
+use crate::context::vector_store::{VectorStoreError, VectorStoreHandle};
+use crate::context::workspace_client::{WorkspaceClient, WorkspaceClientError, CriterionResultPayload, GradeWritePayload};
 use crate::domain::ports::llm_provider::{LlmError, LlmProvider};
 use crate::models::context::assignment_context::AssignmentContext;
 use crate::models::context::submission_context::GradingContext;
+use crate::models::embedding::GradingEmbedding;
 use crate::models::execution::execution_plan::ExecutionPlan;
 use crate::models::grading::grading_result::{CriterionResult, GradingResult};
 
@@ -25,6 +29,9 @@ pub enum WorkflowError {
     #[error("workspace client error: {0}")]
     WorkspaceClient(#[from] WorkspaceClientError),
 
+    #[error("vector store error: {0}")]
+    VectorStore(#[from] VectorStoreError),
+
     #[error("unknown step in plan: {0}")]
     UnknownStep(String),
 
@@ -37,6 +44,7 @@ pub struct WorkflowContext {
     pub provider: Arc<dyn LlmProvider>,
     pub aggregator: Arc<ContextAggregator>,
     pub workspace_client: Arc<WorkspaceClient>,
+    pub vector_store: Option<VectorStoreHandle>,
 }
 
 const DEFAULT_MAX_CONCURRENT: usize = 5;
@@ -58,12 +66,14 @@ fn grading_model() -> String {
         .unwrap_or_else(|| DEFAULT_GRADING_MODEL.to_string())
 }
 
+fn rag_enabled() -> bool {
+    std::env::var("RAG_ENABLED")
+        .ok()
+        .map(|v| v.to_lowercase() == "true" || v == "1")
+        .unwrap_or(true)
+}
+
 /// Orchestrates the full grading pipeline by walking an ExecutionPlan.
-///
-/// Iterates the plan steps in order, dispatching each to the appropriate
-/// handler. Tracks step status (Running → Completed/Failed) for observability.
-/// Submissions are processed in parallel; criteria within a submission
-/// are also parallel, gated by a shared concurrency semaphore.
 pub struct GradingWorkflow {
     ctx: Arc<WorkflowContext>,
 }
@@ -111,9 +121,12 @@ impl GradingWorkflow {
                     let context = context.as_ref()
                         .ok_or_else(|| WorkflowError::Internal("missing grading context".into()))?;
 
-                    let evaluator = EvaluateCriteria::new(self.ctx.provider.as_ref(), semaphore.clone());
+                    let evaluator = EvaluateCriteria::new(
+                        self.ctx.provider.as_ref(),
+                        semaphore.clone(),
+                        self.ctx.vector_store.clone(),
+                    );
 
-                    // Process all submissions in parallel, each evaluating criteria concurrently
                     let grading_tasks: Vec<_> = context.submissions.iter().map(|submission| {
                         let criteria = &assignment.rubric.criteria;
                         async {
@@ -140,7 +153,6 @@ impl GradingWorkflow {
                 }
 
                 "aggregate_scores" => {
-                    // Already folded into evaluate_criteria above — nothing to do.
                     step.mark_completed(serde_json::json!({"status": "skipped"}));
                 }
 
@@ -148,6 +160,7 @@ impl GradingWorkflow {
                     let results = results.as_ref()
                         .ok_or_else(|| WorkflowError::Internal("no results to persist".into()))?;
 
+                    // First persist grades to the workspace service
                     for result in results {
                         let payload = GradeWritePayload {
                             score: result.total_score,
@@ -165,6 +178,17 @@ impl GradingWorkflow {
                     step.mark_completed(serde_json::json!({"count": results.len()}));
                 }
 
+                "store_embeddings" => {
+                    if let Err(e) = self.store_grading_embeddings(
+                        assignment.as_ref(),
+                        context.as_ref(),
+                        results.as_ref(),
+                    ).await {
+                        warn!(error = %e, "failed to store grading embeddings — grading still succeeded");
+                    }
+                    step.mark_completed(serde_json::json!({"status": "ok"}));
+                }
+
                 other => {
                     step.mark_failed(format!("unknown step: {}", other));
                     return Err(WorkflowError::UnknownStep(other.to_string()));
@@ -173,5 +197,101 @@ impl GradingWorkflow {
         }
 
         results.ok_or_else(|| WorkflowError::Internal("plan produced no results".into()))
+    }
+
+    /// Stores embeddings of graded submissions in Qdrant for future RAG retrieval.
+    async fn store_grading_embeddings(
+        &self,
+        assignment: Option<&AssignmentContext>,
+        context: Option<&GradingContext>,
+        results: Option<&Vec<GradingResult>>,
+    ) -> Result<(), WorkflowError> {
+        if !rag_enabled() {
+            return Ok(());
+        }
+
+        let store = match self.ctx.vector_store.as_ref() {
+            Some(s) => s,
+            None => return Ok(()),
+        };
+
+        let assignment = match assignment {
+            Some(a) => a,
+            None => return Ok(()),
+        };
+
+        let context = match context {
+            Some(c) => c,
+            None => return Ok(()),
+        };
+
+        let results = match results {
+            Some(r) => r,
+            None => return Ok(()),
+        };
+
+        for result in results {
+            // Find the matching submission context
+            let submission = match context.submissions.iter()
+                .find(|s| s.submission_id == result.submission_id)
+            {
+                Some(s) => s,
+                None => continue,
+            };
+
+            // For each criterion result, create an embedding point
+            for criterion_result in &result.criteria_results {
+                // Find the matching rubric criterion
+                let criterion = match assignment.rubric.criteria.iter()
+                    .find(|c| c.criterion_id == criterion_result.criterion_id)
+                {
+                    Some(c) => c,
+                    None => continue,
+                };
+
+                let embed_text = EvaluateCriteria::build_embed_text(criterion, &submission.content);
+
+                let vector = match EvaluateCriteria::embed_for_store(
+                    self.ctx.provider.as_ref(),
+                    embed_text,
+                ).await {
+                    Ok(v) => v,
+                    Err(e) => {
+                        warn!(
+                            error = %e,
+                            submission_id = submission.submission_id,
+                            criterion_id = %criterion_result.criterion_id,
+                            "failed to embed grading result — skipping vector store"
+                        );
+                        continue;
+                    }
+                };
+
+                let embedding = GradingEmbedding {
+                    point_id: Uuid::new_v4(),
+                    submission_id: submission.submission_id,
+                    assignment_id: assignment.assignment_id,
+                    workspace_id: assignment.workspace_id,
+                    criterion_id: criterion_result.criterion_id.clone(),
+                    submission_text: submission.content.clone(),
+                    score: criterion_result.score,
+                    max_score: criterion_result.max_score,
+                    feedback: criterion_result.feedback.clone(),
+                    matched_level: criterion_result.matched_level.clone(),
+                };
+
+                if let Err(e) = store.upsert_point(&embedding, vector).await {
+                    warn!(
+                        error = %e,
+                        submission_id = submission.submission_id,
+                        criterion_id = %criterion_result.criterion_id,
+                        "failed to upsert grading embedding to Qdrant"
+                    );
+                }
+            }
+        }
+
+        info!("stored grading embeddings for all criteria");
+        Ok(())
     }
 }
