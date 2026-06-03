@@ -19,6 +19,7 @@ use orchestration::orchestrator::Orchestrator;
 use context::aggregator::ContextAggregator;
 use context::suggestion_cache::SuggestionCache;
 use context::user_config_client::UserConfigClient;
+use context::vector_store::{VectorStore, VectorStoreHandle};
 use context::workspace_client::WorkspaceClient;
 use application::workflows::grading::grading_workflow::WorkflowContext;
 
@@ -36,6 +37,37 @@ fn select_provider() -> Result<Arc<dyn domain::ports::llm_provider::LlmProvider>
             let client = GeminiClient::from_env()?;
             tracing::info!("Gemini provider initialized (model={})", client.model);
             Ok(Arc::new(client))
+        }
+    }
+}
+
+fn init_vector_store() -> Option<VectorStoreHandle> {
+    let rag_enabled = std::env::var("RAG_ENABLED")
+        .ok()
+        .map(|v| v.to_lowercase() == "true" || v == "1")
+        .unwrap_or(true);
+
+    if !rag_enabled {
+        tracing::info!("RAG is disabled — skipping Qdrant initialization");
+        return None;
+    }
+
+    match VectorStore::from_env() {
+        Ok(store) => {
+            let handle = Arc::new(store);
+            let init_handle = handle.clone();
+            tokio::spawn(async move {
+                match init_handle.ensure_collection().await {
+                    Ok(()) => tracing::info!("Qdrant collection ready"),
+                    Err(e) => tracing::warn!(error = %e, "failed to initialize Qdrant collection — RAG will be degraded"),
+                }
+            });
+            tracing::info!("Vector store initialized (Qdrant)");
+            Some(handle)
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to initialize vector store — RAG will be unavailable");
+            None
         }
     }
 }
@@ -62,11 +94,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let suggestion_cache = Arc::new(
         SuggestionCache::from_env(Duration::from_secs(ttl_hours * 3600))?
     );
+    let vector_store = init_vector_store();
 
     let workflow_ctx = Arc::new(WorkflowContext {
         provider: provider.clone(),
         aggregator: aggregator.clone(),
         workspace_client: workspace_client.clone(),
+        vector_store,
     });
     let orchestrator = Arc::new(Orchestrator::new(workflow_ctx));
 
