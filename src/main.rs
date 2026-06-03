@@ -17,6 +17,7 @@ use integration::gemini::client::GeminiClient;
 use integration::openai::OpenAiClient;
 use orchestration::orchestrator::Orchestrator;
 use context::aggregator::ContextAggregator;
+use context::llm_cache::LlmCache;
 use context::suggestion_cache::SuggestionCache;
 use context::user_config_client::UserConfigClient;
 use context::vector_store::{VectorStore, VectorStoreHandle};
@@ -96,11 +97,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     let vector_store = init_vector_store();
 
+    let llm_cache_ttl_hours = std::env::var("LLM_CACHE_TTL_HOURS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(24);
+    let llm_cache = match LlmCache::from_env(Duration::from_secs(llm_cache_ttl_hours * 3600)) {
+        Ok(cache) => {
+            tracing::info!("LLM response cache initialized (Redis, TTL={}h)", llm_cache_ttl_hours);
+            Some(Arc::new(cache))
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to initialize LLM cache — proceeding without caching");
+            None
+        }
+    };
+
     let workflow_ctx = Arc::new(WorkflowContext {
         provider: provider.clone(),
         aggregator: aggregator.clone(),
         workspace_client: workspace_client.clone(),
         vector_store,
+        llm_cache,
     });
     let orchestrator = Arc::new(Orchestrator::new(workflow_ctx));
 

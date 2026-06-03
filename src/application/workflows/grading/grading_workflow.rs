@@ -9,6 +9,7 @@ use uuid::Uuid;
 use crate::application::workflows::grading::steps::aggregate_scores::AggregateScores;
 use crate::application::workflows::grading::steps::evaluate_criteria::EvaluateCriteria;
 use crate::context::aggregator::{AggregatorError, ContextAggregator, SubmissionFilter};
+use crate::context::llm_cache::{LlmCacheError, LlmCacheHandle};
 use crate::context::vector_store::{VectorStoreError, VectorStoreHandle};
 use crate::context::workspace_client::{WorkspaceClient, WorkspaceClientError, CriterionResultPayload, GradeWritePayload};
 use crate::domain::ports::llm_provider::{LlmError, LlmProvider};
@@ -32,6 +33,9 @@ pub enum WorkflowError {
     #[error("vector store error: {0}")]
     VectorStore(#[from] VectorStoreError),
 
+    #[error("llm cache error: {0}")]
+    LlmCache(#[from] LlmCacheError),
+
     #[error("unknown step in plan: {0}")]
     UnknownStep(String),
 
@@ -45,6 +49,7 @@ pub struct WorkflowContext {
     pub aggregator: Arc<ContextAggregator>,
     pub workspace_client: Arc<WorkspaceClient>,
     pub vector_store: Option<VectorStoreHandle>,
+    pub llm_cache: Option<LlmCacheHandle>,
 }
 
 const DEFAULT_MAX_CONCURRENT: usize = 5;
@@ -125,6 +130,7 @@ impl GradingWorkflow {
                         self.ctx.provider.as_ref(),
                         semaphore.clone(),
                         self.ctx.vector_store.clone(),
+                        self.ctx.llm_cache.clone(),
                     );
 
                     let grading_tasks: Vec<_> = context.submissions.iter().map(|submission| {

@@ -64,6 +64,7 @@ services:
       EMBEDDING_MODEL: ${EMBEDDING_MODEL}
       RAG_ENABLED: ${RAG_ENABLED}
       RAG_TOP_K: ${RAG_TOP_K}
+      LLM_CACHE_TTL_HOURS: ${LLM_CACHE_TTL_HOURS}
 
     networks:
       - agora-network
