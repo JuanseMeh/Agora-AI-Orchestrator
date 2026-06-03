@@ -23,6 +23,19 @@ pub trait LlmProvider: Send + Sync {
         &self,
         prompt: String,
     ) -> Result<String, LlmError>;
+
+    /// Embeds a text string into a vector for semantic search.
+    ///
+    /// Returns a flat `Vec<f32>` embedding on success. The default
+    /// implementation returns an error — override per-provider when
+    /// an embedding API is available.
+    async fn embed_text(
+        &self,
+        text: String,
+    ) -> Result<Vec<f32>, LlmError> {
+        let _ = text;
+        Err(LlmError::Unexpected("embedding not supported by this provider".into()))
+    }
 }
 
 /// Provider-agnostic error type.

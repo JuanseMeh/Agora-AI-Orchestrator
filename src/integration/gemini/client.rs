@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use reqwest::Client;
+use serde::Serialize;
 use std::time::Duration;
 use tracing::{error, info};
 use crate::domain::ports::llm_provider::{LlmError, LlmProvider};
@@ -12,6 +13,33 @@ use crate::integration::gemini::types::{GeminiErrorResponse, GeminiResponse};
 const GEMINI_API_BASE: &str =
     "https://generativelanguage.googleapis.com/v1beta/models";
 const DEFAULT_GEMINI_MODEL: &str = "gemini-2.0-flash";
+const DEFAULT_EMBEDDING_MODEL: &str = "text-embedding-004";
+
+#[derive(Debug, Serialize)]
+struct EmbedContentRequest {
+    model: String,
+    content: EmbedContent,
+}
+
+#[derive(Debug, Serialize)]
+struct EmbedContent {
+    parts: Vec<EmbedPart>,
+}
+
+#[derive(Debug, Serialize)]
+struct EmbedPart {
+    text: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct EmbedContentResponse {
+    embedding: EmbeddingValue,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct EmbeddingValue {
+    values: Vec<f32>,
+}
 
 /// Gemini implementation of `LlmProvider`.
 ///
@@ -21,6 +49,7 @@ pub struct GeminiClient {
     client: Client,
     api_key: String,
     pub model: String,
+    embedding_model: String,
 }
 
 impl GeminiClient {
@@ -44,6 +73,13 @@ impl GeminiClient {
             .map(|m| m.trim().to_string())
             .filter(|m| !m.is_empty())
             .unwrap_or_else(|| DEFAULT_GEMINI_MODEL.to_string());
+
+        let embedding_model = std::env::var("EMBEDDING_MODEL")
+            .ok()
+            .map(|m| m.trim().to_string())
+            .filter(|m| !m.is_empty())
+            .unwrap_or_else(|| DEFAULT_EMBEDDING_MODEL.to_string());
+
         let client = Client::builder()
             .no_proxy()
             .http1_only()
@@ -56,6 +92,7 @@ impl GeminiClient {
             client,
             api_key,
             model,
+            embedding_model,
         })
     }
 
@@ -64,6 +101,69 @@ impl GeminiClient {
             "{}/{}:generateContent?key={}",
             GEMINI_API_BASE, self.model, self.api_key
         )
+    }
+
+    fn embed_url(&self) -> String {
+        format!(
+            "{}/{}:embedContent?key={}",
+            GEMINI_API_BASE, self.embedding_model, self.api_key
+        )
+    }
+
+    async fn embed(&self, text: String) -> Result<Vec<f32>, GeminiError> {
+        info!(
+            model = %self.embedding_model,
+            text_len = text.len(),
+            "gemini embed — calling embedContent"
+        );
+
+        let request_body = EmbedContentRequest {
+            model: format!("models/{}", self.embedding_model),
+            content: EmbedContent {
+                parts: vec![EmbedPart { text }],
+            },
+        };
+
+        let response = self
+            .client
+            .post(self.embed_url())
+            .json(&request_body)
+            .send()
+            .await
+            .map_err(|e| {
+                error!(error = %e, "gemini embed request failed");
+                GeminiError::Network(e)
+            })?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let error_body = response
+                .json::<GeminiErrorResponse>()
+                .await
+                .map_err(|e| {
+                    error!(error = %e, status = %status, "failed to parse gemini embed error response");
+                    GeminiError::Deserialization(e.to_string())
+                })?;
+
+            error!(
+                status = %status,
+                error_detail = ?error_body.error,
+                "gemini embed — API error"
+            );
+            return Err(GeminiError::from_api_detail(error_body.error));
+        }
+
+        let embed_response = response
+            .json::<EmbedContentResponse>()
+            .await
+            .map_err(|e| GeminiError::Deserialization(e.to_string()))?;
+
+        info!(
+            "gemini embed — success embedding_dim={}",
+            embed_response.embedding.values.len()
+        );
+
+        Ok(embed_response.embedding.values)
     }
 
     async fn send(&self, prompt: String) -> Result<CriterionResult, GeminiError> {
@@ -217,6 +317,15 @@ impl LlmProvider for GeminiClient {
         prompt: String,
     ) -> Result<String, LlmError> {
         self.send_text(prompt)
+            .await
+            .map_err(LlmError::from)
+    }
+
+    async fn embed_text(
+        &self,
+        text: String,
+    ) -> Result<Vec<f32>, LlmError> {
+        self.embed(text)
             .await
             .map_err(LlmError::from)
     }

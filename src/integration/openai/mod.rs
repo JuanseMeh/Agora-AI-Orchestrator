@@ -8,6 +8,41 @@ use tracing::{error, info};
 use crate::domain::ports::llm_provider::{LlmError, LlmProvider};
 use crate::models::grading::grading_result::CriterionResult;
 
+const DEFAULT_EMBEDDING_MODEL: &str = "text-embedding-ada-002";
+
+#[derive(Debug, Serialize)]
+struct EmbeddingRequest {
+    model: String,
+    input: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+struct EmbeddingResponse {
+    data: Vec<EmbeddingData>,
+    model: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct EmbeddingData {
+    embedding: Vec<f32>,
+}
+
+#[derive(Debug, Deserialize)]
+struct EmbeddingErrorResponse {
+    error: EmbeddingErrorDetail,
+}
+
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+struct EmbeddingErrorDetail {
+    message: String,
+    #[serde(default)]
+    code: Option<String>,
+    #[serde(default)]
+    r#type: Option<String>,
+}
+
 const DEFAULT_OPENAI_BASE_URL: &str = "https://api.groq.com/openai/v1";
 const DEFAULT_OPENAI_MODEL: &str = "mixtral-8x7b-32768";
 
@@ -99,6 +134,7 @@ pub struct OpenAiClient {
     api_key: String,
     pub model: String,
     base_url: String,
+    embedding_model: String,
 }
 
 impl OpenAiClient {
@@ -126,6 +162,12 @@ impl OpenAiClient {
             .filter(|m| !m.is_empty())
             .unwrap_or_else(|| DEFAULT_OPENAI_BASE_URL.to_string());
 
+        let embedding_model = std::env::var("EMBEDDING_MODEL")
+            .ok()
+            .map(|m| m.trim().to_string())
+            .filter(|m| !m.is_empty())
+            .unwrap_or_else(|| DEFAULT_EMBEDDING_MODEL.to_string());
+
         let client = Client::builder()
             .no_proxy()
             .http1_only()
@@ -134,11 +176,88 @@ impl OpenAiClient {
             .build()
             .map_err(|e| OpenAiError::Configuration(format!("failed to build http client: {}", e)))?;
 
-        Ok(Self { client, api_key, model, base_url })
+        Ok(Self { client, api_key, model, base_url, embedding_model })
     }
 
     fn chat_completions_url(&self) -> String {
         format!("{}/chat/completions", self.base_url)
+    }
+
+    fn embeddings_url(&self) -> String {
+        format!("{}/embeddings", self.base_url)
+    }
+
+    async fn send_embedding(&self, text: String) -> Result<Vec<f32>, OpenAiError> {
+        info!(
+            model = %self.embedding_model,
+            text_len = text.len(),
+            "openai embed — calling embeddings API"
+        );
+
+        let request_body = EmbeddingRequest {
+            model: self.embedding_model.clone(),
+            input: text,
+        };
+
+        let response = self
+            .client
+            .post(self.embeddings_url())
+            .header("Authorization", format!("Bearer {}", self.api_key))
+            .json(&request_body)
+            .send()
+            .await
+            .map_err(|e| {
+                error!(error = %e, "openai embedding request failed");
+                OpenAiError::Network(e)
+            })?;
+
+        let status = response.status();
+
+        if !status.is_success() {
+            let error_body = response
+                .json::<EmbeddingErrorResponse>()
+                .await
+                .map_err(|e| {
+                    error!(error = %e, status = %status, "failed to parse openai embed error response");
+                    OpenAiError::Deserialization(e.to_string())
+                })?;
+
+            let code = error_body.error.code
+                .as_ref()
+                .and_then(|c| c.parse::<u16>().ok())
+                .unwrap_or(status.as_u16());
+
+            error!(
+                status = %status,
+                error_detail = ?error_body.error,
+                "openai embed — API error"
+            );
+            return Err(OpenAiError::Api {
+                code,
+                message: error_body.error.message,
+            });
+        }
+
+        let embed_response = response
+            .json::<EmbeddingResponse>()
+            .await
+            .map_err(|e| OpenAiError::Deserialization(e.to_string()))?;
+
+        let embedding = embed_response.data
+            .into_iter()
+            .next()
+            .map(|d| d.embedding)
+            .ok_or_else(|| {
+                error!("openai embed — empty data array");
+                OpenAiError::EmptyResponse
+            })?;
+
+        info!(
+            "openai embed — success embedding_dim={}",
+            embedding.len()
+        );
+
+        Ok(embedding)
     }
 
     async fn send(&self, prompt: String) -> Result<CriterionResult, OpenAiError> {
@@ -344,5 +463,12 @@ impl LlmProvider for OpenAiClient {
         prompt: String,
     ) -> Result<String, LlmError> {
         self.send_text(prompt).await.map_err(LlmError::from)
+    }
+
+    async fn embed_text(
+        &self,
+        text: String,
+    ) -> Result<Vec<f32>, LlmError> {
+        self.send_embedding(text).await.map_err(LlmError::from)
     }
 }

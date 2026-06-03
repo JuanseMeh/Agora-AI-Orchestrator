@@ -1,6 +1,22 @@
-version: "3.9"
-
 services:
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: ai-orchestrator-qdrant
+    restart: unless-stopped
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/6333"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+    networks:
+      - agora-network
+
   redis:
     image: redis:7-alpine
     container_name: ai-orchestrator-redis
@@ -25,6 +41,8 @@ services:
     depends_on:
       redis:
         condition: service_healthy
+      qdrant:
+        condition: service_healthy
     ports:
       - "50051:50051"
     env_file: .env
@@ -41,12 +59,19 @@ services:
       GEMINI_API_KEY: ${GEMINI_API_KEY}
       GEMINI_MODEL: ${GEMINI_MODEL}
       RUST_LOG: ${RUST_LOG}
+      QDRANT_URL: ${QDRANT_URL}
+      EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL}
+      RAG_ENABLED: ${RAG_ENABLED}
+      RAG_TOP_K: ${RAG_TOP_K}
+      LLM_CACHE_TTL_HOURS: ${LLM_CACHE_TTL_HOURS}
 
     networks:
       - agora-network
 
 volumes:
   redis_data:
+  qdrant_data:
 
 networks:
   agora-network:

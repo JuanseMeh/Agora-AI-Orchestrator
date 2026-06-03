@@ -44,6 +44,9 @@ redis = { version = "0.27", features = ["tokio-comp"] }
 # Async concurrency utilities
 futures = "0.3"
 
+# Vector database client (Qdrant)
+qdrant-client = "1.13"
+
 [build-dependencies]
 # Only needed when you add .proto files for gRPC
 tonic-prost-build = "0.14.2"   # replaces tonic-build for compilation
