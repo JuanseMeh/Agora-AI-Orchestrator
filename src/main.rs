@@ -116,8 +116,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         provider: provider.clone(),
         aggregator: aggregator.clone(),
         workspace_client: workspace_client.clone(),
-        vector_store,
-        llm_cache,
+        vector_store: vector_store.clone(),
+        llm_cache: llm_cache.clone(),
     });
     let orchestrator = Arc::new(Orchestrator::new(workflow_ctx));
 
@@ -133,6 +133,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         suggestion_cache,
         workspace_client,
         provider,
+        vector_store.clone(),
+        llm_cache.clone(),
     ).await?;
 
     Ok(())

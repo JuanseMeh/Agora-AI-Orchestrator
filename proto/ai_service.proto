@@ -30,8 +30,17 @@ message SuggestAssignmentResponse {
   SuggestionStats stats = 3;
 }
 
+message CriterionOverride {
+  int32 submission_id = 1;
+  string criterion_id = 2;
+  double original_score = 3;
+  double teacher_score = 4;
+  string teacher_feedback = 5;
+}
+
 message ApproveSuggestionRequest {
   string suggestion_id = 1;
+  repeated CriterionOverride overrides = 2;
 }
 
 message ApproveSuggestionResponse {

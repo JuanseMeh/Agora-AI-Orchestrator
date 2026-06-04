@@ -138,6 +138,59 @@ impl VectorStore {
         Ok(())
     }
 
+    /// Stores a teacher-corrected grading example in Qdrant.
+    ///
+    /// These points are tagged with `teacher_corrected: true` so they
+    /// can be boosted or distinguished from AI-generated points during
+    /// RAG retrieval.
+    pub async fn store_teacher_correction(
+        &self,
+        point_id: &str,
+        submission_id: i32,
+        assignment_id: i32,
+        workspace_id: i32,
+        criterion_id: &str,
+        submission_text: &str,
+        score: f64,
+        max_score: f64,
+        feedback: &str,
+        matched_level: &str,
+        vector: Vec<f32>,
+    ) -> Result<(), VectorStoreError> {
+        let payload = json!({
+            "submission_id": submission_id,
+            "assignment_id": assignment_id,
+            "workspace_id": workspace_id,
+            "criterion_id": criterion_id,
+            "submission_text": submission_text,
+            "score": score,
+            "max_score": max_score,
+            "feedback": feedback,
+            "matched_level": matched_level,
+            "teacher_corrected": true,
+        });
+
+        let body = json!({
+            "points": [{
+                "id": point_id,
+                "vector": vector,
+                "payload": payload
+            }]
+        });
+
+        let url = format!("{}/collections/{}/points", self.config.url, self.config.collection_name);
+        let resp = self.client.put(&url).json(&body).send().await?;
+        let status = resp.status();
+
+        if !status.is_success() {
+            let text = resp.text().await.unwrap_or_default();
+            error!(status = %status, body = %text, "qdrant store correction failed");
+            return Err(VectorStoreError::Api { status: status.as_u16(), message: text });
+        }
+
+        Ok(())
+    }
+
     /// Searches for the top-K most similar past grading examples.
     ///
     /// `criterion_id` filters results to the same criterion (so examples
