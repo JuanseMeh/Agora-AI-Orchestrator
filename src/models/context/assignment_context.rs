@@ -15,5 +15,15 @@ pub struct AssignmentContext {
     pub rubric: Rubric,
     /// Optional learning objectives to give the LLM additional grading context.
     pub learning_objectives: Option<Vec<String>>,
+    /// Processed text content from files attached to this assignment
+    /// (e.g. reference documents, templates). Extracted by the Media
+    /// Service and concatenated for LLM context.
+    pub assignment_attachments_content: Option<String>,
     pub created_at: DateTime<Utc>,
+}
+
+impl AssignmentContext {
+    pub fn attachments_text(&self) -> Option<&str> {
+        self.assignment_attachments_content.as_deref()
+    }
 }
