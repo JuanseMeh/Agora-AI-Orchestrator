@@ -65,6 +65,7 @@ services:
       RAG_ENABLED: ${RAG_ENABLED}
       RAG_TOP_K: ${RAG_TOP_K}
       LLM_CACHE_TTL_HOURS: ${LLM_CACHE_TTL_HOURS}
+      MEDIA_SERVICE_URL: ${MEDIA_SERVICE_URL}
 
     networks:
       - agora-network
