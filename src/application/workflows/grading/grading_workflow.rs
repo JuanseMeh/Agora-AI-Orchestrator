@@ -134,9 +134,8 @@ impl GradingWorkflow {
                     );
 
                     let grading_tasks: Vec<_> = context.submissions.iter().map(|submission| {
-                        let criteria = &assignment.rubric.criteria;
                         async {
-                            let criteria_results = evaluator.run(criteria, submission).await?;
+                            let criteria_results = evaluator.run(assignment, submission).await?;
                             Ok::<_, WorkflowError>(criteria_results)
                         }
                     }).collect();
