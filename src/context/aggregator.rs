@@ -1,20 +1,25 @@
-// context/aggregator.rs
+use std::collections::HashSet;
 
+use serde_json::Value;
+use thiserror::Error;
+use tracing::warn;
+use uuid::Uuid;
+
+use crate::context::media_client::{MediaClientError, MediaServiceClient};
 use crate::context::workspace_client::{
-    WorkspaceClient, WorkspaceClientError, AssignmentResponse, SubmissionResponse,
+    AssignmentResponse, SubmissionResponse, WorkspaceClient, WorkspaceClientError,
 };
 use crate::models::context::assignment_context::AssignmentContext;
 use crate::models::context::submission_context::{GradingContext, SubmissionContext};
 use crate::models::grading::rubric::{Rubric, RubricCriterion, ScoringLevel};
-use serde_json::Value;
-use thiserror::Error;
-use uuid::Uuid;
-use std::collections::HashSet;
 
 #[derive(Debug, Error)]
 pub enum AggregatorError {
     #[error("workspace client error: {0}")]
     WorkspaceClient(#[from] WorkspaceClientError),
+
+    #[error("media client error: {0}")]
+    MediaClient(#[from] MediaClientError),
 
     #[error("assignment {id} is not closed — grading only runs on closed assignments")]
     AssignmentNotClosed { id: i32 },
@@ -45,23 +50,23 @@ pub struct SubmissionFilter {
 /// Workspace Service response shapes onto internal domain models.
 pub struct ContextAggregator {
     client: WorkspaceClient,
+    media_client: MediaServiceClient,
 }
 
 impl ContextAggregator {
-    pub fn new(client: WorkspaceClient) -> Self {
-        Self { client }
+    pub fn new(client: WorkspaceClient, media_client: MediaServiceClient) -> Self {
+        Self { client, media_client }
     }
 
     pub fn from_env() -> Result<Self, WorkspaceClientError> {
-        Ok(Self {
-            client: WorkspaceClient::from_env()?,
-        })
+        let client = WorkspaceClient::from_env()?;
+        let media_client = MediaServiceClient::from_env().map_err(|e| {
+            WorkspaceClientError::Configuration(e.to_string())
+        })?;
+        Ok(Self { client, media_client })
     }
 
     /// Builds a complete `GradingContext` for the given assignment.
-    ///
-    /// Validates that the assignment is closed (status = 2) before
-    /// proceeding — grading is only valid on closed assignments.
     pub async fn build_grading_context(
         &self,
         assignment_id: i32,
@@ -76,32 +81,22 @@ impl ContextAggregator {
         filter: &SubmissionFilter,
     ) -> Result<(AssignmentContext, GradingContext), AggregatorError> {
         let raw_assignment = self.client.fetch_assignment(assignment_id).await?;
-
-        // status 2 = Cerrado — only closed assignments can be graded
-        // if raw_assignment.status != "CERRADO" {
-        //     return Err(AggregatorError::AssignmentNotClosed { id: assignment_id });
-        // }
-
         let raw_submissions = self.client.fetch_submissions(assignment_id).await?;
         let filtered_submissions = self.apply_submission_filter(raw_submissions, filter);
 
-        let assignment_context = self.map_assignment(&raw_assignment)?;
+        let assignment_context = self.map_assignment(&raw_assignment).await?;
         let workspace_id = raw_assignment.workspace_id;
 
-        let submission_contexts = filtered_submissions
-            .iter()
-            .map(|s| self.map_submission(s))
-            .collect::<Result<Vec<_>, _>>()?;
+        let mut submission_contexts = Vec::with_capacity(filtered_submissions.len());
+        for s in &filtered_submissions {
+            submission_contexts.push(self.map_submission(s).await?);
+        }
 
         if submission_contexts.is_empty() {
             return Err(AggregatorError::NoSubmissions { assignment_id });
         }
 
-        let grading_context = GradingContext::new(
-            assignment_id,
-            workspace_id,
-            submission_contexts,
-        );
+        let grading_context = GradingContext::new(assignment_id, workspace_id, submission_contexts);
 
         Ok((assignment_context, grading_context))
     }
@@ -130,15 +125,13 @@ impl ContextAggregator {
                 if !submission_id_set.is_empty() && !submission_id_set.contains(&s.id) {
                     return false;
                 }
-
                 if !user_id_set.is_empty() && !user_id_set.contains(&s.user_id) {
                     return false;
                 }
-
-                if !filter.include_already_graded && Self::is_already_graded(s.ai_result.as_ref()) {
+                if !filter.include_already_graded && Self::is_already_graded(s.ai_result.as_ref())
+                {
                     return false;
                 }
-
                 true
             })
             .collect()
@@ -148,59 +141,149 @@ impl ContextAggregator {
         let Some(result) = ai_result else {
             return false;
         };
-
-        result
+        let has_ai_score = result
             .get("ai")
             .and_then(|ai| ai.get("score"))
-            .is_some()
+            .is_some();
+        let has_teacher_score = result
+            .get("teacher")
+            .and_then(|t| t.get("score"))
+            .is_some();
+        let ai_approved = result
+            .get("aiStatus")
+            .and_then(|s| s.as_str())
+            .map_or(false, |s| s == "APPROVED");
+        has_ai_score || ai_approved || has_teacher_score
+    }
+
+    /// Extracts `mediaId` values from a JSONB attachments array.
+    ///
+    /// Workspace service stores submission files and assignment settings
+    /// as `{ "attachments": [{ "mediaId": "uuid", ... }, ...] }`.
+    /// Returns all mediaId strings found, or an empty vec.
+    fn extract_media_ids(value: &Option<Value>) -> Vec<String> {
+        let Some(val) = value else { return vec![] };
+        let Some(attachments) = val.get("attachments") else { return vec![] };
+        let Some(array) = attachments.as_array() else { return vec![] };
+        array
+            .iter()
+            .filter_map(|item| item.get("mediaId").and_then(|v| v.as_str()))
+            .map(|s| s.to_string())
+            .collect()
+    }
+
+    /// Concatenates processed text items into a single block with separators.
+    fn join_file_texts(items: &[crate::context::media_client::BatchProcessItem]) -> Option<String> {
+        if items.is_empty() {
+            return None;
+        }
+        let parts: Vec<String> = items
+            .iter()
+            .map(|item| {
+                format!(
+                    "--- File: {} (type: {}) ---\n{}",
+                    item.original_filename, item.mime_type, item.text
+                )
+            })
+            .collect();
+        Some(parts.join("\n\n"))
     }
 
     /// Maps a raw `AssignmentResponse` onto `AssignmentContext`.
-    fn map_assignment(
+    ///
+    /// Fetches processed text from any files attached to the assignment
+    /// (e.g. reference documents) via the Media Service.
+    async fn map_assignment(
         &self,
         raw: &AssignmentResponse,
     ) -> Result<AssignmentContext, AggregatorError> {
         let rubric = self.parse_rubric(raw.id, &raw.rubric)?;
 
-        Ok(AssignmentContext {
+        let mut assignment = AssignmentContext {
             assignment_id: raw.id,
             workspace_id: raw.workspace_id,
-            course_id: raw.workspace_id, // workspace is the course scope for now
+            course_id: raw.workspace_id,
             title: raw.name.clone(),
             description: raw.description.clone(),
             rubric,
             learning_objectives: None,
+            assignment_attachments_content: None,
             created_at: raw.due_date,
-        })
+        };
+
+        let media_ids = Self::extract_media_ids(&raw.settings);
+        if !media_ids.is_empty() {
+            match self.media_client.batch_process(media_ids).await {
+                Ok(items) => {
+                    assignment.assignment_attachments_content = Self::join_file_texts(&items);
+                    if assignment.assignment_attachments_content.is_some() {
+                        tracing::info!(
+                            assignment_id = raw.id,
+                            file_count = items.len(),
+                            "fetched assignment attachment content"
+                        );
+                    }
+                }
+                Err(e) => {
+                    warn!(
+                        error = %e,
+                        assignment_id = raw.id,
+                        "failed to fetch assignment attachment content — continuing without it"
+                    );
+                }
+            }
+        }
+
+        Ok(assignment)
     }
 
     /// Maps a raw `SubmissionResponse` onto `SubmissionContext`.
     ///
-    /// Extracts the submission text from the `content` JSONB field.
-    /// Looks for a `"text"` key first, falls back to full JSON serialization.
-    fn map_submission(
+    /// Extracts the submission text from the `content` JSONB field and
+    /// fetches processed text from any files the student attached.
+    async fn map_submission(
         &self,
         raw: &SubmissionResponse,
     ) -> Result<SubmissionContext, AggregatorError> {
         let content = Self::extract_content_text(raw.id, &raw.content)?;
 
-        Ok(SubmissionContext {
+        let mut submission = SubmissionContext {
             submission_id: raw.id,
             assignment_id: raw.assignment_id,
             user_id: raw.user_id,
             content,
+            submission_files_content: None,
             submitted_at: raw.created_at,
             previous_ai_result: raw.ai_result.clone(),
-        })
+        };
+
+        let media_ids = Self::extract_media_ids(&raw.files);
+        if !media_ids.is_empty() {
+            match self.media_client.batch_process(media_ids).await {
+                Ok(items) => {
+                    submission.submission_files_content = Self::join_file_texts(&items);
+                    if submission.submission_files_content.is_some() {
+                        tracing::info!(
+                            submission_id = raw.id,
+                            file_count = items.len(),
+                            "fetched submission file content"
+                        );
+                    }
+                }
+                Err(e) => {
+                    warn!(
+                        error = %e,
+                        submission_id = raw.id,
+                        "failed to fetch submission file content — continuing without it"
+                    );
+                }
+            }
+        }
+
+        Ok(submission)
     }
 
     /// Extracts a plain text string from the `content` JSONB field.
-    ///
-    /// Strategy:
-    /// 1. If content has a `"text"` key, use its string value.
-    /// 2. If content has an `"answer"` key, use its string value.
-    /// 3. Fall back to serializing the whole JSON value as a string.
-    ///    This handles freeform content maps gracefully.
     fn extract_content_text(
         submission_id: i32,
         content: &serde_json::Value,
@@ -213,17 +296,12 @@ impl ContextAggregator {
             return Ok(answer.to_string());
         }
 
-        // Fallback: serialize the whole content map
         serde_json::to_string(content).map_err(|_| {
             AggregatorError::ContentExtractionFailed { submission_id }
         })
     }
 
     /// Parses the `rubric` JSONB field into a typed `Rubric` model.
-    ///
-    /// Attempts direct deserialization first. If that fails it means
-    /// the rubric schema doesn't match — surfaces a clear error rather
-    /// than panicking.
     fn parse_rubric(
         &self,
         assignment_id: i32,
@@ -351,12 +429,16 @@ impl ContextAggregator {
         let mut criteria = Vec::with_capacity(simple_map.len());
 
         for (name, value) in simple_map {
-            if ["rubric_id", "assignment_id", "title", "description", "criteria"].contains(&name.as_str()) {
+            if ["rubric_id", "assignment_id", "title", "description", "criteria"]
+                .contains(&name.as_str())
+            {
                 continue;
             }
-            let max_score = value.as_f64().ok_or_else(|| AggregatorError::RubricParseFailed {
-                assignment_id,
-                reason: format!("rubric field '{}' must be numeric", name),
+            let max_score = value.as_f64().ok_or_else(|| {
+                AggregatorError::RubricParseFailed {
+                    assignment_id,
+                    reason: format!("rubric field '{}' must be numeric", name),
+                }
             })?;
 
             let criterion_id = name.to_lowercase().replace(' ', "_");
@@ -397,9 +479,11 @@ fn parse_scoring_levels(
     max_score: f64,
     levels: &Value,
 ) -> Result<Vec<ScoringLevel>, AggregatorError> {
-    let raw_levels = levels.as_array().ok_or_else(|| AggregatorError::RubricParseFailed {
-        assignment_id,
-        reason: format!("scoring_levels for '{}' must be an array", criterion_name),
+    let raw_levels = levels.as_array().ok_or_else(|| {
+        AggregatorError::RubricParseFailed {
+            assignment_id,
+            reason: format!("scoring_levels for '{}' must be an array", criterion_name),
+        }
     })?;
 
     if raw_levels.is_empty() {
@@ -419,17 +503,27 @@ fn parse_scoring_levels(
 
     let mut parsed = Vec::with_capacity(raw_levels.len());
     for level in raw_levels {
-        let level_obj = level.as_object().ok_or_else(|| AggregatorError::RubricParseFailed {
-            assignment_id,
-            reason: format!("each scoring level for '{}' must be an object", criterion_name),
-        })?;
-
-        let score = level_obj.get("score").and_then(|v| v.as_f64()).ok_or_else(|| {
+        let level_obj = level.as_object().ok_or_else(|| {
             AggregatorError::RubricParseFailed {
                 assignment_id,
-                reason: format!("scoring level score for '{}' must be numeric", criterion_name),
+                reason: format!(
+                    "each scoring level for '{}' must be an object",
+                    criterion_name
+                ),
             }
         })?;
+
+        let score = level_obj.get("score").and_then(|v| v.as_f64()).ok_or_else(
+            || {
+                AggregatorError::RubricParseFailed {
+                    assignment_id,
+                    reason: format!(
+                        "scoring level score for '{}' must be numeric",
+                        criterion_name
+                    ),
+                }
+            },
+        )?;
 
         let label = level_obj
             .get("label")
