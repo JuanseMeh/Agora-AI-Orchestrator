@@ -13,9 +13,19 @@ pub struct SubmissionContext {
     pub user_id: uuid::Uuid,
     /// Raw submission content — essay text, code, or answer body.
     pub content: String,
+    /// Processed text content from files the student attached to this submission.
+    /// Extracted via the Media Service (OCR, transcription, document parsing).
+    /// Concatenated from all submission file attachments.
+    pub submission_files_content: Option<String>,
     pub submitted_at: DateTime<Utc>,
     /// Previous AI result if this is a re-grade, preserved for audit purposes.
     pub previous_ai_result: Option<serde_json::Value>,
+}
+
+impl SubmissionContext {
+    pub fn files_text(&self) -> Option<&str> {
+        self.submission_files_content.as_deref()
+    }
 }
 
 /// The unified context object passed into the grading pipeline.

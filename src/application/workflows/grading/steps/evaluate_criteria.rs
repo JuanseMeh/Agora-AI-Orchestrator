@@ -8,6 +8,7 @@ use crate::application::prompts::criterion_prompt::CriterionPromptBuilder;
 use crate::context::llm_cache::{LlmCache, LlmCacheHandle};
 use crate::context::vector_store::VectorStoreHandle;
 use crate::domain::ports::llm_provider::{LlmError, LlmProvider};
+use crate::models::context::assignment_context::AssignmentContext;
 use crate::models::context::submission_context::SubmissionContext;
 use crate::models::embedding::SimilarGradeExample;
 use crate::models::grading::grading_result::CriterionResult;
@@ -55,12 +56,14 @@ impl<'a> EvaluateCriteria<'a> {
         Self { provider, semaphore, vector_store, llm_cache }
     }
 
-    /// Evaluates every criterion in `criteria` against the submission content.
+    /// Evaluates every criterion in the assignment's rubric against the submission,
+    /// using full assignment context (title, description, attachments, submission files).
     pub async fn run(
         &self,
-        criteria: &[RubricCriterion],
+        assignment: &AssignmentContext,
         submission: &SubmissionContext,
     ) -> Result<Vec<CriterionResult>, LlmError> {
+        let criteria = &assignment.rubric.criteria;
         let content = &submission.content;
         let submission_id = submission.submission_id;
         let llm_cache = self.llm_cache.clone();
@@ -70,6 +73,11 @@ impl<'a> EvaluateCriteria<'a> {
             let criterion_for_rag = criterion.clone();
             let cache_key = LlmCache::build_key(submission_id, &criterion_for_rag.criterion_id);
             let llm_cache = llm_cache.clone();
+
+            let assignment_title = assignment.title.clone();
+            let assignment_description = assignment.description.clone();
+            let assignment_attachments = assignment.assignment_attachments_content.clone();
+            let submission_files = submission.submission_files_content.clone();
 
             async move {
                 // Check cache first — no semaphore needed for cache hits
@@ -95,12 +103,36 @@ impl<'a> EvaluateCriteria<'a> {
 
                 let prompt = if let Some(ref ex) = examples {
                     if ex.is_empty() {
-                        CriterionPromptBuilder::build(&criterion_for_rag, &content)
+                        CriterionPromptBuilder::build_with_full_context(
+                            &criterion_for_rag,
+                            &content,
+                            &assignment_title,
+                            &assignment_description,
+                            assignment_attachments.as_deref(),
+                            submission_files.as_deref(),
+                            ex,
+                        )
                     } else {
-                        CriterionPromptBuilder::build_with_rag(&criterion_for_rag, &content, ex)
+                        CriterionPromptBuilder::build_with_full_context(
+                            &criterion_for_rag,
+                            &content,
+                            &assignment_title,
+                            &assignment_description,
+                            assignment_attachments.as_deref(),
+                            submission_files.as_deref(),
+                            ex,
+                        )
                     }
                 } else {
-                    CriterionPromptBuilder::build(&criterion_for_rag, &content)
+                    CriterionPromptBuilder::build_with_full_context(
+                        &criterion_for_rag,
+                        &content,
+                        &assignment_title,
+                        &assignment_description,
+                        assignment_attachments.as_deref(),
+                        submission_files.as_deref(),
+                        &[],
+                    )
                 };
 
                 let result = self.provider.evaluate_criterion(prompt).await?;
