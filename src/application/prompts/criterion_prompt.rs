@@ -10,6 +10,7 @@ pub struct CriterionPromptBuilder;
 
 impl CriterionPromptBuilder {
     /// Builds a rubric-constrained evaluation prompt with basic context.
+    #[allow(dead_code)]
     pub fn build(criterion: &RubricCriterion, submission_text: &str) -> String {
         let scoring_levels = criterion.levels_as_prompt_context();
         let description = criterion
@@ -27,11 +28,16 @@ impl CriterionPromptBuilder {
             None,
             None,
             None,
+            "detailed",
+            "moderated",
+            None,
+            None,
         )
     }
 
     /// Builds an evaluation prompt augmented with similar past grading
     /// examples retrieved via RAG (vector similarity search).
+    #[allow(dead_code)]
     pub fn build_with_rag(
         criterion: &RubricCriterion,
         submission_text: &str,
@@ -53,11 +59,20 @@ impl CriterionPromptBuilder {
             None,
             None,
             None,
+            "detailed",
+            "moderated",
+            None,
+            None,
         )
     }
 
     /// Builds an evaluation prompt with full assignment context, including
     /// title, description, reference attachment content, and submission files.
+    ///
+    /// `retro_style`: feedback verbosity ("brief" | "detailed" | "full").
+    /// `exigency_level`: grading strictness ("flexible" | "moderated" | "strict").
+    /// `grading_scale`: optional max scale value (e.g. 5.0 for Colombian 0.0–5.0).
+    /// `teacher_instructions`: free-form text injected verbatim into the prompt.
     pub fn build_with_full_context(
         criterion: &RubricCriterion,
         submission_text: &str,
@@ -66,6 +81,10 @@ impl CriterionPromptBuilder {
         assignment_attachments: Option<&str>,
         submission_files: Option<&str>,
         examples: &[SimilarGradeExample],
+        retro_style: &str,
+        exigency_level: &str,
+        grading_scale: Option<f64>,
+        teacher_instructions: Option<&str>,
     ) -> String {
         let scoring_levels = criterion.levels_as_prompt_context();
         let description = criterion
@@ -83,6 +102,10 @@ impl CriterionPromptBuilder {
             Some(assignment_description),
             assignment_attachments,
             submission_files,
+            retro_style,
+            exigency_level,
+            grading_scale,
+            teacher_instructions,
         )
     }
 
@@ -96,6 +119,10 @@ impl CriterionPromptBuilder {
         assignment_description: Option<&str>,
         assignment_attachments: Option<&str>,
         submission_files: Option<&str>,
+        retro_style: &str,
+        exigency_level: &str,
+        grading_scale: Option<f64>,
+        teacher_instructions: Option<&str>,
     ) -> String {
         let mut prompt = String::new();
 
@@ -107,6 +134,9 @@ impl CriterionPromptBuilder {
                 if !desc.is_empty() {
                     prompt.push_str(&format!("Description: {}\n", desc));
                 }
+            }
+            if let Some(scale) = grading_scale {
+                prompt.push_str(&format!("Grading scale: 0.0 to {:.1}\n", scale));
             }
             prompt.push('\n');
         }
@@ -147,6 +177,45 @@ impl CriterionPromptBuilder {
             scoring_levels = scoring_levels,
         ));
 
+        // ── Teacher grading preferences ─────────────────────────────────
+        let exigency_instruction = match exigency_level {
+            "flexible" => "Be lenient in your evaluation. Award partial credit when \
+                           the answer shows understanding of the concept even if it is \
+                           not completely correct. Look for effort and reasoning.",
+            "strict" => "Be strict in your evaluation. Only award full points if the \
+                         answer is completely correct with no errors. Minor mistakes \
+                         should reduce the score to the next lower level.",
+            _ => "Use balanced judgment. Partially correct answers should receive \
+                  partial credit at the appropriate scoring level.",
+        };
+
+        let feedback_instruction = match retro_style {
+            "brief" => "Keep feedback very concise: 1-2 sentences.",
+            "full" => "Provide comprehensive feedback: 4-6 sentences with specific \
+                       examples from the submission.",
+            _ => "Keep feedback concise: 2-4 sentences.",
+        };
+
+        prompt.push_str(&format!(
+            "## Grading Style\n\
+             Strictness: {}\n\
+             Feedback style: {}\n\n",
+            exigency_instruction,
+            feedback_instruction,
+        ));
+
+        // ── Teacher custom instructions ─────────────────────────────────
+        if let Some(instr) = teacher_instructions {
+            if !instr.is_empty() {
+                prompt.push_str(&format!(
+                    "## Additional Teacher Instructions\n\
+                     The teacher has provided the following additional instructions \
+                     for grading this assignment:\n{}\n\n",
+                    instr,
+                ));
+            }
+        }
+
         // ── RAG examples ────────────────────────────────────────────────
         if !examples.is_empty() {
             prompt.push_str(
@@ -182,7 +251,7 @@ impl CriterionPromptBuilder {
              - Do NOT invent scores outside the defined levels.\n\
              - Your feedback must reference the criterion description and justify why \
                the submission matches the assigned level.\n\
-             - Keep feedback concise: 2-4 sentences.\n\n\
+             - {feedback_instruction}\n\n\
              ## Required JSON Response Format\n\
              {{\n\
                \"criterion_id\": \"{criterion_id}\",\n\
@@ -196,6 +265,7 @@ impl CriterionPromptBuilder {
             criterion_id = criterion.criterion_id,
             name = criterion.name,
             max_score = criterion.max_score(),
+            feedback_instruction = feedback_instruction,
         ));
 
         prompt

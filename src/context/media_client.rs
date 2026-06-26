@@ -31,7 +31,6 @@ pub struct BatchProcessResponse {
 }
 
 #[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
 struct BatchProcessRequest {
     media_ids: Vec<String>,
 }

@@ -45,11 +45,15 @@ impl Orchestrator {
     /// Builds an ExecutionPlan via the appropriate planner, then runs
     /// it through the matched workflow. The `persist` flag controls
     /// whether the plan includes the `save_grades` step.
+    /// `retro_style` and `exigency_level` come from the teacher's AI profile
+    /// and are injected into the LLM prompt to control feedback style and strictness.
     pub async fn dispatch(
         &self,
         request: &OrchestratorRequest,
         filter: &SubmissionFilter,
         persist: bool,
+        retro_style: &str,
+        exigency_level: &str,
     ) -> Result<Vec<GradingResult>, OrchestratorError> {
         let (workspace_id, assignment_id) = match request {
             OrchestratorRequest::GradeAssignment { workspace_id, assignment_id } => {
@@ -65,7 +69,7 @@ impl Orchestrator {
             crate::models::execution::execution_plan::WorkflowType::GradingWorkflow => {
                 let mut plan = GradingPlanner::build(workspace_id, assignment_id, persist);
                 let workflow = GradingWorkflow::new(self.ctx.clone());
-                workflow.run(&mut plan, assignment_id, filter)
+                workflow.run(&mut plan, assignment_id, filter, retro_style, exigency_level)
                     .await
                     .map_err(OrchestratorError::from)
             }

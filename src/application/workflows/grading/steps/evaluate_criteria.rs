@@ -58,15 +58,24 @@ impl<'a> EvaluateCriteria<'a> {
 
     /// Evaluates every criterion in the assignment's rubric against the submission,
     /// using full assignment context (title, description, attachments, submission files).
+    /// `retro_style` controls feedback verbosity ("brief" | "detailed" | "full").
+    /// `exigency_level` controls grading strictness ("flexible" | "moderated" | "strict").
     pub async fn run(
         &self,
         assignment: &AssignmentContext,
         submission: &SubmissionContext,
+        retro_style: &str,
+        exigency_level: &str,
     ) -> Result<Vec<CriterionResult>, LlmError> {
         let criteria = &assignment.rubric.criteria;
         let content = &submission.content;
         let submission_id = submission.submission_id;
         let llm_cache = self.llm_cache.clone();
+
+        let retro_style_owned = retro_style.to_string();
+        let exigency_level_owned = exigency_level.to_string();
+        let grading_scale = assignment.grading_scale;
+        let teacher_instructions = assignment.teacher_instructions.clone();
 
         let futs: Vec<_> = criteria.iter().map(|criterion| {
             let content = content.clone();
@@ -78,6 +87,10 @@ impl<'a> EvaluateCriteria<'a> {
             let assignment_description = assignment.description.clone();
             let assignment_attachments = assignment.assignment_attachments_content.clone();
             let submission_files = submission.submission_files_content.clone();
+
+            let retro_style_owned = retro_style_owned.clone();
+            let exigency_level_owned = exigency_level_owned.clone();
+            let teacher_instructions = teacher_instructions.clone();
 
             async move {
                 // Check cache first — no semaphore needed for cache hits
@@ -102,27 +115,19 @@ impl<'a> EvaluateCriteria<'a> {
                 ).await;
 
                 let prompt = if let Some(ref ex) = examples {
-                    if ex.is_empty() {
-                        CriterionPromptBuilder::build_with_full_context(
-                            &criterion_for_rag,
-                            &content,
-                            &assignment_title,
-                            &assignment_description,
-                            assignment_attachments.as_deref(),
-                            submission_files.as_deref(),
-                            ex,
-                        )
-                    } else {
-                        CriterionPromptBuilder::build_with_full_context(
-                            &criterion_for_rag,
-                            &content,
-                            &assignment_title,
-                            &assignment_description,
-                            assignment_attachments.as_deref(),
-                            submission_files.as_deref(),
-                            ex,
-                        )
-                    }
+                    CriterionPromptBuilder::build_with_full_context(
+                        &criterion_for_rag,
+                        &content,
+                        &assignment_title,
+                        &assignment_description,
+                        assignment_attachments.as_deref(),
+                        submission_files.as_deref(),
+                        ex,
+                        &retro_style_owned,
+                        &exigency_level_owned,
+                        grading_scale,
+                        teacher_instructions.as_deref(),
+                    )
                 } else {
                     CriterionPromptBuilder::build_with_full_context(
                         &criterion_for_rag,
@@ -132,10 +137,33 @@ impl<'a> EvaluateCriteria<'a> {
                         assignment_attachments.as_deref(),
                         submission_files.as_deref(),
                         &[],
+                        &retro_style_owned,
+                        &exigency_level_owned,
+                        grading_scale,
+                        teacher_instructions.as_deref(),
                     )
                 };
 
+                info!(
+                    submission_id = submission_id,
+                    criterion_id = %criterion_for_rag.criterion_id,
+                    submission_text_len = content.len(),
+                    submission_text = %content.chars().take(2000).collect::<String>(),
+                    submission_files = %submission_files.as_deref().unwrap_or("none").chars().take(500).collect::<String>(),
+                    assignment_attachments = %assignment_attachments.as_deref().unwrap_or("none").chars().take(500).collect::<String>(),
+                    "evaluate_criteria — sending prompt to LLM"
+                );
+
                 let result = self.provider.evaluate_criterion(prompt).await?;
+
+                info!(
+                    submission_id = submission_id,
+                    criterion_id = %criterion_for_rag.criterion_id,
+                    score = result.score,
+                    matched_level = %result.matched_level,
+                    feedback = %result.feedback.chars().take(500).collect::<String>(),
+                    "evaluate_criteria — LLM response"
+                );
 
                 // Store result in cache
                 if let Some(ref cache) = llm_cache {

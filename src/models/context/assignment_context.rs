@@ -19,6 +19,12 @@ pub struct AssignmentContext {
     /// (e.g. reference documents, templates). Extracted by the Media
     /// Service and concatenated for LLM context.
     pub assignment_attachments_content: Option<String>,
+    /// Grading scale max value (e.g. 5.0 for Colombian 0.0–5.0 scale).
+    /// Read from assignment.settings.grading_scale. Defaults to rubric.max_score().
+    pub grading_scale: Option<f64>,
+    /// Free-form instructions from the teacher injected verbatim into the LLM prompt.
+    /// Read from assignment.settings.teacher_instructions.
+    pub teacher_instructions: Option<String>,
     pub created_at: DateTime<Utc>,
 }
 
