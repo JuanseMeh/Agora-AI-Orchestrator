@@ -61,14 +61,25 @@ fn max_concurrent_llm_calls() -> usize {
         .unwrap_or(DEFAULT_MAX_CONCURRENT)
 }
 
-const DEFAULT_GRADING_MODEL: &str = "gemini-2.0-flash";
-
 fn grading_model() -> String {
-    std::env::var("GEMINI_MODEL")
-        .ok()
-        .map(|m| m.trim().to_string())
-        .filter(|m| !m.is_empty())
-        .unwrap_or_else(|| DEFAULT_GRADING_MODEL.to_string())
+    let provider = std::env::var("LLM_PROVIDER")
+        .unwrap_or_else(|_| "gemini".to_string());
+    match provider.to_lowercase().as_str() {
+        "openai" | "groq" => {
+            std::env::var("OPENAI_MODEL")
+                .ok()
+                .map(|m| m.trim().to_string())
+                .filter(|m| !m.is_empty())
+                .unwrap_or_else(|| "unknown".to_string())
+        }
+        _ => {
+            std::env::var("GEMINI_MODEL")
+                .ok()
+                .map(|m| m.trim().to_string())
+                .filter(|m| !m.is_empty())
+                .unwrap_or_else(|| "gemini-2.0-flash".to_string())
+        }
+    }
 }
 
 fn rag_enabled() -> bool {
@@ -89,11 +100,15 @@ impl GradingWorkflow {
     }
 
     /// Executes the plan for a given assignment and submission filter.
+    /// `retro_style` controls feedback verbosity ("brief" | "detailed" | "full").
+    /// `exigency_level` controls grading strictness ("flexible" | "moderated" | "strict").
     pub async fn run(
         &self,
         plan: &mut ExecutionPlan,
         assignment_id: i32,
         filter: &SubmissionFilter,
+        retro_style: &str,
+        exigency_level: &str,
     ) -> Result<Vec<GradingResult>, WorkflowError> {
         plan.steps.sort_by_key(|s| s.order);
 
@@ -135,7 +150,9 @@ impl GradingWorkflow {
 
                     let grading_tasks: Vec<_> = context.submissions.iter().map(|submission| {
                         async {
-                            let criteria_results = evaluator.run(assignment, submission).await?;
+                            let criteria_results = evaluator.run(
+                                assignment, submission, retro_style, exigency_level,
+                            ).await?;
                             Ok::<_, WorkflowError>(criteria_results)
                         }
                     }).collect();

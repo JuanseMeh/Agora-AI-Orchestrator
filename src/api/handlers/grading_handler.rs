@@ -91,7 +91,7 @@ impl AiService for GradingHandler {
         };
 
         let results = self.orchestrator
-            .dispatch(&orchestrator_request, &filter, false)
+            .dispatch(&orchestrator_request, &filter, false, &profile.retro_style, &profile.exigency_level)
             .await
             .map_err(map_orchestrator_error)?;
 
@@ -170,7 +170,7 @@ impl AiService for GradingHandler {
         };
 
         let results = self.orchestrator
-            .dispatch(&orchestrator_request, &filter, true)
+            .dispatch(&orchestrator_request, &filter, true, "detailed", "moderated")
             .await
             .map_err(map_orchestrator_error)?;
 

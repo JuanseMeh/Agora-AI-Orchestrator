@@ -199,6 +199,18 @@ impl ContextAggregator {
     ) -> Result<AssignmentContext, AggregatorError> {
         let rubric = self.parse_rubric(raw.id, &raw.rubric)?;
 
+        let grading_scale = raw.settings
+            .as_ref()
+            .and_then(|s| s.get("grading_scale"))
+            .and_then(|v| v.as_f64());
+
+        let teacher_instructions = raw.settings
+            .as_ref()
+            .and_then(|s| s.get("teacher_instructions"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .filter(|s| !s.is_empty());
+
         let mut assignment = AssignmentContext {
             assignment_id: raw.id,
             workspace_id: raw.workspace_id,
@@ -208,6 +220,8 @@ impl ContextAggregator {
             rubric,
             learning_objectives: None,
             assignment_attachments_content: None,
+            grading_scale,
+            teacher_instructions,
             created_at: raw.due_date,
         };
 
