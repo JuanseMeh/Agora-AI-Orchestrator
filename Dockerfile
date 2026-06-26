@@ -13,17 +13,22 @@ RUN apk add --no-cache \
     protobuf-dev \
     protoc
 
-# Create app directory
 WORKDIR /app
 
-# Copy dependency files first for better caching
+# Copy manifests + build script + proto first — layer cached unless these change
 COPY Cargo.toml Cargo.lock ./
 COPY build.rs ./
 COPY proto ./proto/
+
+# Dummy build: cache ALL dependency compilation (tokio, tonic, prost, qdrant, etc.)
+# without the real source. Then nuke the dummy so the real build below reuses artifacts.
+RUN mkdir src && echo "fn main() {}" > src/main.rs && \
+    cargo build --release --bin ai 2>/dev/null && \
+    rm -rf src
+
+# Real source — only app code recompiles, deps stay cached from the layer above
 COPY src ./src
 
-# Build the application
-# Using release profile for optimized binary
 RUN cargo build --release --bin ai
 
 # ============================================
